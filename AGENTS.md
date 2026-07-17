@@ -48,15 +48,15 @@ Toolchain version pinned in `go.mod`: `go 1.26.5`.
 
 ## Gotchas that bite
 
-- **`--config` flag default is `/etc/pinstrel.toml`, not `config.toml`.** The
-  `usage` string in `main.go` is stale and says the opposite. When running
-  locally, pass `--config config.toml` explicitly or you'll silently load
-  defaults from a missing `/etc/pinstrel.toml` (`LoadConfig` returns defaults
-  with no error on a missing file).
-- **`config.toml` is gitignored and not tracked.** The working copy here
-  happens to contain a live Discord token — do not commit it, do not paste it
-  into commits/PRs, and don't add a tracked sample that mirrors its real
-  values. Config schema is documented in README §3.3 and `config.go`.
+- **There is no `--config` flag.** pinstrel is a system daemon wired to a
+  fixed config path (`/etc/pinstrel.toml`, hard-coded in `main.go`). A missing
+  file is a hard error — `LoadConfig` does not silently substitute defaults.
+  For local dev, point your shell at a temp config by editing `configPath` in
+  `main.go` or symlink `/etc/pinstrel.toml` to your working copy.
+- **`config.toml` (in the repo root) is gitignored and not tracked.** The
+  working copy here happens to contain a live Discord token — do not commit it,
+  do not paste it into commits/PRs, and don't add a tracked sample that mirrors
+  its real values. Config schema is documented in README §3.3 and `config.go`.
 - **Do not remove the `replace` directive in `go.mod`.** It pins a DAVE
   (Discord voice E2EE) fork of `github.com/bwmarrin/discordgo`
   (`yeongaori/discordgo …3d3293e4c765`, head of upstream PR #1704). Without it,

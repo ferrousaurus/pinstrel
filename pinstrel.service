@@ -10,7 +10,7 @@ Type=simple
 # Discord gateway connection plus a Unix domain socket for IPC with shairport-sync.
 # /etc/pinstrel.toml is required; the daemon also chmods the socket/pipe to be
 # world-writable so the shairport-sync user can talk to it without sharing a group.
-ExecStart=/usr/local/bin/pinstrel daemon --config /etc/pinstrel.toml
+ExecStart=/usr/local/bin/pinstrel daemon
 Restart=on-failure
 RestartSec=5
 

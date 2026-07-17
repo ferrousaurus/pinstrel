@@ -95,7 +95,10 @@ func (d *Daemon) Start() error {
 	defer listener.Close()
 	defer os.Remove(d.config.SocketPath)
 
-	if err := os.Chmod(d.config.SocketPath, 0644); err != nil {
+	// 0666 (rw-rw-rw-) so shairport-sync — which may run as a different user —
+	// can connect() to the socket without sharing a group with pinstrel. See
+	// pinstrel.service: PrivateTmp is deliberately disabled for the same reason.
+	if err := os.Chmod(d.config.SocketPath, 0666); err != nil {
 		log.Printf("Warning: failed to chmod socket %s: %v", d.config.SocketPath, err)
 	}
 
@@ -279,7 +282,13 @@ func (d *Daemon) streamLoop() {
 	// signals stopCh when it flips false. We close stopCh only when streamLoop
 	// itself is exiting so the ticker goroutine can return; on the happy path
 	// the ticker goroutine exits via the stopCh close in the deferred cleanup.
-	stopCh := make(chan struct{})
+	// stopCh is buffered (cap 1) so the ticker goroutine's send can never be
+	// lost: streamLoop may be parked in another select arm when the stop
+	// arrives, and an unbuffered non-blocking send would drop the signal and
+	// leave streamLoop blocked until the deadline. A blocking send on a cap-1
+	// channel always queues exactly one signal; the ticker goroutine exits
+	// immediately after the (single) delivery.
+	stopCh := make(chan struct{}, 1)
 	go func() {
 		t := time.NewTicker(100 * time.Millisecond)
 		defer t.Stop()
@@ -290,10 +299,7 @@ func (d *Daemon) streamLoop() {
 				stillStreaming := d.isStreaming
 				d.activeMu.Unlock()
 				if !stillStreaming {
-					select {
-					case stopCh <- struct{}{}:
-					default:
-					}
+					stopCh <- struct{}{}
 					return
 				}
 			case <-stopCh:

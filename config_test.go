@@ -22,23 +22,17 @@ func TestDefaultConfig(t *testing.T) {
 	}
 }
 
-func TestLoadConfig(t *testing.T) {
-	// Test loading non-existent config returns defaults
-	cfg, err := LoadConfig("non_existent_file.toml")
-	if err != nil {
-		t.Fatalf("LoadConfig failed for non-existent file: %v", err)
+func TestLoadConfig_MissingFile(t *testing.T) {
+	// A missing config file is a hard error: pinstrel is wired to a fixed
+	// system path and must not silently substitute defaults.
+	_, err := LoadConfig("non_existent_file.toml")
+	if err == nil {
+		t.Fatal("Expected error for non-existent config file, got nil")
 	}
-	if cfg.Bitrate != 128000 {
-		t.Errorf("Expected default Bitrate, got %d", cfg.Bitrate)
-	}
+}
 
-	// Test loading valid TOML config
-	tmpDir, err := os.MkdirTemp("", "pinstrel-test")
-	if err != nil {
-		t.Fatalf("Failed to create temp dir: %v", err)
-	}
-	defer os.RemoveAll(tmpDir)
-
+func TestLoadConfig_ValidFile(t *testing.T) {
+	tmpDir := t.TempDir()
 	configPath := filepath.Join(tmpDir, "config.toml")
 	tomlData := `
 DISCORD_TOKEN = "test-token"
@@ -70,5 +64,9 @@ SOCKET_PATH = "/tmp/custom-socket.sock"
 	}
 	if loadedCfg.SocketPath != "/tmp/custom-socket.sock" {
 		t.Errorf("Expected SocketPath '/tmp/custom-socket.sock', got '%s'", loadedCfg.SocketPath)
+	}
+	// VoiceReadyTimeout is not set in the TOML, so it must fall back to the default.
+	if loadedCfg.VoiceReadyTimeout != 30 {
+		t.Errorf("Expected default VoiceReadyTimeout 30, got %d", loadedCfg.VoiceReadyTimeout)
 	}
 }

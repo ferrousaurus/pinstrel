@@ -1,25 +1,23 @@
 package main
 
 import (
-	"flag"
 	"fmt"
 	"log"
 	"os"
 )
 
-var usage = `Usage: pinstrel <command> [options]
+// configPath is the single canonical location of the pinstrel TOML config.
+// pinstrel is a system daemon wired to shairport-sync via /etc; there is no
+// per-invocation config flag, and a missing file is a hard error.
+const configPath = "/etc/pinstrel.toml"
+
+const usage = `Usage: pinstrel <command>
 
 Commands:
-    daemon    Start the background streaming daemon
-    start     Signal the daemon to join voice and start streaming
-    stop      Signal the daemon to stop streaming and leave voice
-
-Options:
-	--config  Path to config.toml (default: config.toml, fallback: /etc/pinstrel.toml`
-
-func printUsage() {
-	fmt.Println(usage)
-}
+  daemon    Start the background streaming daemon
+  start     Signal the daemon to join voice and start streaming
+  stop      Signal the daemon to stop streaming and leave voice
+`
 
 func daemon(cfg *Config) {
 	if cfg.DiscordToken == "" {
@@ -29,12 +27,11 @@ func daemon(cfg *Config) {
 		log.Fatal("Error: DISCORD_CHANNEL_ID is required in config for daemon mode")
 	}
 
-	daemon, err := NewDaemon(cfg)
+	d, err := NewDaemon(cfg)
 	if err != nil {
 		log.Fatalf("Error initializing daemon: %v", err)
 	}
-
-	if err := daemon.Start(); err != nil {
+	if err := d.Start(); err != nil {
 		log.Fatalf("Daemon runtime error: %v", err)
 	}
 }
@@ -55,38 +52,25 @@ func stop(cfg *Config) {
 
 func main() {
 	if len(os.Args) < 2 {
-		printUsage()
+		fmt.Print(usage)
 		os.Exit(1)
 	}
 
-	subcommand := os.Args[1]
-
-	fs := flag.NewFlagSet(subcommand, flag.ExitOnError)
-	configPath := *fs.String("config", "/etc/pinstrel.toml", "path to pinstrel TOML configuration file")
-
-	if err := fs.Parse(os.Args[2:]); err != nil {
-		log.Fatalf("Error parsing flags: %v", err)
-	}
-
-	log.Printf("Loading Pinstrel configuration from: %s", configPath)
-
+	log.Printf("Loading pinstrel configuration from: %s", configPath)
 	cfg, err := LoadConfig(configPath)
 	if err != nil {
-		log.Fatalf("Error loading Pinstrel configuration from %s: %v", configPath, err)
+		log.Fatalf("Error loading pinstrel configuration from %s: %v", configPath, err)
 	}
 
-	switch subcommand {
+	switch os.Args[1] {
 	case "daemon":
 		daemon(cfg)
-
 	case "start":
 		start(cfg)
-
 	case "stop":
 		stop(cfg)
-
 	default:
-		printUsage()
+		fmt.Print(usage)
 		os.Exit(1)
 	}
 }
