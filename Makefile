@@ -19,7 +19,7 @@ BINARY     := pinstrel
 all: $(BINARY)
 
 $(BINARY):
-	go build $(GOFLAGS) -ldflags '$(LDFLAGS)' -o $(BINARY) .
+	go build $(GOFLAGS) -ldflags '$(LDFLAGS)' -o ./dist/$(BINARY) .
 
 # Build on the Pi itself (same as `make all` — alias for clarity).
 install-native: $(BINARY)
@@ -32,18 +32,18 @@ install-native: $(BINARY)
 pi-arm64:
 	GOOS=linux GOARCH=arm64 CGO_ENABLED=1 \
 	CC=aarch64-linux-gnu-gcc \
-	go build $(GOFLAGS) -ldflags '$(LDFLAGS)' -o $(BINARY) .
+	go build $(GOFLAGS) -ldflags '$(LDFLAGS)' -o ./dist/$(BINARY) .
 
 # Cross-compile for a 32-bit armv6/7 Raspberry Pi (Pi Zero W, original Pi).
 #   Debian: sudo apt-get install gcc-arm-linux-gnueabihf
 pi-arm:
 	GOOS=linux GOARCH=arm GOARM=7 CGO_ENABLED=1 \
 	CC=arm-linux-gnueabihf-gcc \
-	go build $(GOFLAGS) -ldflags '$(LDFLAGS)' -o $(BINARY) .
+	go build $(GOFLAGS) -ldflags '$(LDFLAGS)' -o ./dist/$(BINARY) .
 
 test:
 	go vet ./...
 	go test ./...
 
 clean:
-	rm -f $(BINARY)
+	rm -f ./dist/$(BINARY)

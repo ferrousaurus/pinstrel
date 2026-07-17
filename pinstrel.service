@@ -1,6 +1,6 @@
 [Unit]
 Description=pinstrel AirPlay-to-Discord streaming daemon
-Documentation=https://github.com/ferrousaurus/pinstral
+Documentation=https://github.com/ferrousaurus/pinstrel
 After=network-online.target shairport-sync.service
 Wants=network-online.target
 

@@ -17,7 +17,7 @@ import (
 	"gopkg.in/hraban/opus.v2"
 )
 
-// Daemon manages the Discord session, Unix socket server, and audio stream.
+// manages the Discord session, Unix socket server, and audio stream.
 type Daemon struct {
 	config      *Config
 	dg          *discordgo.Session
@@ -33,37 +33,30 @@ type Daemon struct {
 	joining bool
 }
 
-// NewDaemon initializes a new Daemon, resolving the GuildID from the ChannelID.
+// initializes a new Daemon, resolving the GuildID from the ChannelID.
 func NewDaemon(cfg *Config) (*Daemon, error) {
 	dg, err := discordgo.New("Bot " + cfg.DiscordToken)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create Discord session: %w", err)
 	}
 	dg.Identify.Intents = discordgo.IntentsGuilds | discordgo.IntentsGuildVoiceStates
-	// Surface discordgo's internal voice-handshake logs so journald shows which
-	// stage stalls when a `timeout waiting for voice` occurs (see README
-	// troubleshooting). LogInformational emits the "connecting to voice endpoint",
-	// "connecting to udp addr", and "udp read error" lines that diagnose the
-	// known net.DialUDP connected-socket reply-drop failure mode.
 	dg.LogLevel = discordgo.LogInformational
 
-	// Query Discord API to find the Guild ID corresponding to the voice channel
 	log.Printf("Connecting to Discord to resolve channel info for %s...", cfg.ChannelID)
 	ch, err := dg.Channel(cfg.ChannelID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to retrieve channel details: %w (verify Discord Token and Channel ID)", err)
 	}
-	guildID := ch.GuildID
-	log.Printf("Successfully resolved channel %s to Guild ID %s", cfg.ChannelID, guildID)
+	log.Printf("Successfully resolved channel %s to Guild ID %s", cfg.ChannelID, ch.GuildID)
 
 	return &Daemon{
 		config:  cfg,
 		dg:      dg,
-		guildID: guildID,
+		guildID: ch.GuildID,
 	}, nil
 }
 
-// Start opens the Discord session and listens for IPC commands on the Unix socket.
+// opens the Discord session and listens for IPC commands on the Unix socket.
 func (d *Daemon) Start() error {
 	if err := d.dg.Open(); err != nil {
 		return fmt.Errorf("failed to open Discord session: %w", err)
@@ -77,9 +70,7 @@ func (d *Daemon) Start() error {
 	// voice.open(); these handlers are read-only observers that add pinstrel
 	// context about *which* event arrived and with what payload.
 	d.dg.AddHandler(func(s *discordgo.Session, vs *discordgo.VoiceStateUpdate) {
-		// Discord fires VOICE_STATE_UPDATE for *every* user in the guild; only
-		// log the bot's own state to avoid noise. We compare against the bot's
-		// own user id, which discordgo populates on READY into s.State.User.
+		// Filter VOICE_STATE_UPDATE events to those fired by the bot
 		selfID := ""
 		if s.State != nil && s.State.User != nil {
 			selfID = s.State.User.ID
@@ -91,13 +82,10 @@ func (d *Daemon) Start() error {
 			vs.GuildID, vs.ChannelID, vs.SessionID, vs.UserID)
 	})
 	d.dg.AddHandler(func(s *discordgo.Session, vss *discordgo.VoiceServerUpdate) {
-		// token redacted intentionally — never log Discord voice tokens.
 		log.Printf("VOICE_SERVER_UPDATE: guild=%s endpoint=%s token_present=%t",
 			vss.GuildID, vss.Endpoint, vss.Token != "")
 	})
 
-	// Ensure socket directory exists
-	// (usually /tmp, but good to handle)
 	_ = os.Remove(d.config.SocketPath)
 
 	listener, err := net.Listen("unix", d.config.SocketPath)
@@ -107,8 +95,7 @@ func (d *Daemon) Start() error {
 	defer listener.Close()
 	defer os.Remove(d.config.SocketPath)
 
-	// Grant write permissions to the socket so other users (e.g. shairport-sync) can communicate with it
-	if err := os.Chmod(d.config.SocketPath, 0777); err != nil {
+	if err := os.Chmod(d.config.SocketPath, 0644); err != nil {
 		log.Printf("Warning: failed to chmod socket %s: %v", d.config.SocketPath, err)
 	}
 
@@ -124,7 +111,24 @@ func (d *Daemon) Start() error {
 	}
 }
 
-// handleIPC handles client requests (start/stop) on the Unix domain socket.
+func (d *Daemon) handleIPCStart(conn net.Conn) (int, error) {
+	if err := d.startStreaming(); err != nil {
+		log.Printf("Error starting stream: %v", err)
+		return fmt.Fprintf(conn, "ERR: %v\n", err)
+	} else {
+		return conn.Write([]byte("OK\n"))
+	}
+}
+
+func (d *Daemon) handleIPCStop(conn net.Conn) (int, error) {
+	if err := d.stopStreaming(); err != nil {
+		log.Printf("Error stopping stream: %v", err)
+		return fmt.Fprintf(conn, "ERR: %v\n", err)
+	} else {
+		return conn.Write([]byte("OK\n"))
+	}
+}
+
 func (d *Daemon) handleIPC(conn net.Conn) {
 	defer conn.Close()
 	scanner := bufio.NewScanner(conn)
@@ -133,26 +137,16 @@ func (d *Daemon) handleIPC(conn net.Conn) {
 		log.Printf("Received IPC command: %s", cmd)
 		switch cmd {
 		case "start":
-			if err := d.startStreaming(); err != nil {
-				log.Printf("Error starting stream: %v", err)
-				_, _ = conn.Write([]byte(fmt.Sprintf("ERR: %v\n", err)))
-			} else {
-				_, _ = conn.Write([]byte("OK\n"))
-			}
+			_, _ = d.handleIPCStart(conn)
 		case "stop":
-			if err := d.stopStreaming(); err != nil {
-				log.Printf("Error stopping stream: %v", err)
-				_, _ = conn.Write([]byte(fmt.Sprintf("ERR: %v\n", err)))
-			} else {
-				_, _ = conn.Write([]byte("OK\n"))
-			}
+			_, _ = d.handleIPCStop(conn)
 		default:
 			_, _ = conn.Write([]byte("ERR: Unknown command\n"))
 		}
 	}
 }
 
-// startStreaming kicks off a Discord voice join in the background and returns
+// kicks off a Discord voice join in the background and returns
 // OK to the IPC client (shairport) immediately, without waiting for the voice
 // WS/UDP handshake. This replaces the previous synchronous ChannelVoiceJoin
 // call, which blocked shairport's `run_this_before_play_begins` hook for up to
@@ -205,7 +199,7 @@ func (d *Daemon) startStreaming() error {
 	return nil
 }
 
-// stopStreaming closes the named pipe and disconnects the Discord voice bot.
+// closes the named pipe and disconnects the Discord voice bot.
 func (d *Daemon) stopStreaming() error {
 	d.activeMu.Lock()
 	defer d.activeMu.Unlock()
@@ -241,7 +235,7 @@ func (d *Daemon) stopStreaming() error {
 	return nil
 }
 
-// streamLoop performs the full lifecycle of a streaming session on a single
+// performs the full lifecycle of a streaming session on a single
 // goroutine: it runs the blocking ChannelVoiceJoin in a sub-goroutine, opens
 // the audio FIFO for reading in another, and once both have succeeded enters
 // the Opus encode/send loop. It owns d.activePipe and is the single place
@@ -498,7 +492,7 @@ func (d *Daemon) streamLoop() {
 		}
 
 		// Convert Little-Endian PCM byte buffer to int16 samples
-		for i := 0; i < pcmSize; i++ {
+		for i := range pcmSize {
 			pcmBuf[i] = int16(binary.LittleEndian.Uint16(byteBuf[i*2 : i*2+2]))
 		}
 
@@ -513,12 +507,9 @@ func (d *Daemon) streamLoop() {
 		packet := make([]byte, n)
 		copy(packet, opusBuf[:n])
 
-		// Send packet to Discord voice gateway
 		select {
 		case vc.OpusSend <- packet:
 		default:
-			// If the channel queue is full, we print a warning to monitor buffering issues.
-			// We do not block to prevent lagging behind real-time.
 			log.Println("Warning: OpusSend channel full, dropping packet")
 		}
 	}
