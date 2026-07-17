@@ -8,19 +8,21 @@ import (
 
 // Config holds the application configuration.
 type Config struct {
-	DiscordToken string `toml:"DISCORD_TOKEN"`
-	ChannelID    string `toml:"DISCORD_CHANNEL_ID"`
-	Bitrate      int    `toml:"BITRATE"`
-	PipePath     string `toml:"PIPE_PATH"`
-	SocketPath   string `toml:"SOCKET_PATH"`
+	DiscordToken      string `toml:"DISCORD_TOKEN"`
+	ChannelID         string `toml:"DISCORD_CHANNEL_ID"`
+	Bitrate           int    `toml:"BITRATE"`
+	PipePath          string `toml:"PIPE_PATH"`
+	SocketPath        string `toml:"SOCKET_PATH"`
+	VoiceReadyTimeout int    `toml:"VOICE_READY_TIMEOUT"` // seconds; deadline for the voice WS/UDP handshake before we abandon the join
 }
 
 // DefaultConfig returns a Config initialized with default values.
 func DefaultConfig() *Config {
 	return &Config{
-		Bitrate:    128000,
-		PipePath:   "/tmp/shairport-sync-audio",
-		SocketPath: "/tmp/pinstrel.sock",
+		Bitrate:           128000,
+		PipePath:          "/tmp/shairport-sync-audio",
+		SocketPath:        "/tmp/pinstrel.sock",
+		VoiceReadyTimeout: 30,
 	}
 }
 

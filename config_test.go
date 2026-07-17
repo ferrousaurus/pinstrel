@@ -17,6 +17,9 @@ func TestDefaultConfig(t *testing.T) {
 	if cfg.SocketPath != "/tmp/pinstrel.sock" {
 		t.Errorf("Expected default SocketPath to be /tmp/pinstrel.sock, got %s", cfg.SocketPath)
 	}
+	if cfg.VoiceReadyTimeout != 30 {
+		t.Errorf("Expected default VoiceReadyTimeout to be 30 (seconds), got %d", cfg.VoiceReadyTimeout)
+	}
 }
 
 func TestLoadConfig(t *testing.T) {

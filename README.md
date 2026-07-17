@@ -92,6 +92,11 @@ DISCORD_CHANNEL_ID = "YOUR_DISCORD_VOICE_CHANNEL_ID"
 BITRATE = 128000
 PIPE_PATH = "/tmp/shairport-sync-audio"
 SOCKET_PATH = "/tmp/pinstrel.sock"
+# Seconds pinstrel waits for the full Discord voice handshake
+# (VOICE_SERVER_UPDATE -> voice WS OP2 -> UDP IP-discovery -> Select Protocol)
+# before abandoning the join and disconnecting cleanly. Discord's own internal
+# wait is ~10s; 30s gives comfortable headroom for slow voice-server rotation.
+VOICE_READY_TIMEOUT = 30
 ```
 
 ### Step 3.4: Install and Enable Systemd Service
@@ -113,12 +118,13 @@ sudo systemctl start pinstrel
    - `shairport-sync` accepts the connection.
    - `shairport-sync` executes the script hook: `/usr/local/bin/pinstrel start`.
    - The CLI client sends a `start` command to `/tmp/pinstrel.sock`.
-   - The `pinstrel` daemon joins the voice channel, opens the named pipe `/tmp/shairport-sync-audio`, and begins reading the 48kHz PCM data.
+   - The `pinstrel` daemon pre-creates the audio FIFO if needed, kicks off the Discord voice join in the background, and returns `OK` to the hook immediately — so shairport never blocks on the (possibly slow) voice handshake.
+   - In the background, the daemon concurrently waits for the voice WS/UDP handshake to finish (`VOICE_SERVER_UPDATE` → `OP2 READY` → UDP IP-discovery → `Select Protocol`) and for shairport to open the FIFO writer side. Once both succeed, it begins reading 48kHz PCM from the pipe.
    - The daemon encodes the PCM data into Opus frames and streams them to Discord.
 2. When you stop AirPlay playback or disconnect:
    - `shairport-sync` executes the script hook: `/usr/local/bin/pinstrel stop` (triggered after the configured `session_timeout` of 10 seconds).
    - The CLI client sends a `stop` command to `/tmp/pinstrel.sock`.
-   - The daemon closes the pipe, stops the streaming loop, and disconnects from the voice channel.
+   - The daemon closes the pipe, stops the streaming loop, and cleanly disconnects from the voice channel (sends Discord the nil-channel OP4 so no ghost presence remains).
 
 ## Troubleshooting
 
@@ -136,5 +142,19 @@ sudo systemctl start pinstrel
   Ensure `/tmp/pinstrel.sock` is writeable by the `shairport-sync` user. The daemon automatically runs `chmod 0777` on the socket file at startup.
 - **`could not connect to pinstrel daemon ... no such file or directory` from shairport-sync**:
   Almost always means the pinstrel systemd unit has `PrivateTmp=true` enabled (or another form of `/tmp` isolation). A private `/tmp` makes both `/tmp/pinstrel.sock` and the audio FIFO `/tmp/shairport-sync-audio` invisible to `shairport-sync`, which runs in the host `/tmp` namespace. The shipped `pinstrel.service` deliberately omits `PrivateTmp`; do not re-add it. If you customized the unit, remove `PrivateTmp=true` and run `sudo systemctl daemon-reload && sudo systemctl restart pinstrel`.
+- **Bot joins but stays deafened and `ERR: failed to join voice channel: timeout waiting for voice` appears in shairport-sync logs**:
+  This is Discord's voice WS/UDP handshake failing to complete within discordgo's ~10s internal `waitUntilConnected` poll, surfaced to the shairport hook as an error. The full handshake is: gateway `VOICE_STATE_UPDATE` (discordgo gets the bot's `session_id`) -> `VOICE_SERVER_UPDATE` (discordgo gets the voice endpoint + token, opens the voice WS) -> voice WS `OP2` READY (discordgo gets SSRC + UDP port, opens the UDP socket, does IP discovery) -> `Select Protocol` (discordgo tells Discord the encryption mode). A stall at any stage yields `timeout waiting for voice`.
+
+  Symptom patterns to look for in `sudo journalctl -u pinstrel -f` (with the daemon's discordgo `LogLevel = LogInformational`):
+  - **`VOICE_STATE_UPDATE` never logged for the bot** → gateway never dispatched, or `s.State.User.ID` is unpopulated. Verify the bot token is correct and that the bot is in the server.
+  - **`VOICE_SERVER_UPDATE` never logged** → the bot lacks `Connect`/`Speak`/`Use Voice Activity` permissions on the target channel (see Section 1 step 5), or the channel id is wrong.
+  - **`connecting to udp addr ...` logged, then nothing** → UDP IP-discovery reply dropped (most often because discordgo v0.29.0 advertised the deprecated `xsalsa20_poly1305` Select Protocol mode that modern Discord voice servers reject). pinstrel now tracks discordgo `master`, which advertises `aead_aes256_gcm_rtpsize`; if you've pinned an older commit, re-run `go get github.com/bwmarrin/discordgo@master && go build && sudo cp pinstrel /usr/local/bin/`.
+  - **`Voice join exceeded ... deadline — abandoning`** from pinstrel itself (not from discordgo) → the handshake stalled longer than `VOICE_READY_TIMEOUT` (default 30s). The bot is auto-disconnected (gateway nil-channel OP4) so no "ghost" lingers; raise the timeout only if you have evidence of legitimately slow voice-server rotation.
+
+  Architecturally, the daemon returns `OK` to shairport's `run_this_before_play_begins` hook *before* the handshake completes, so a handshake failure no longer blocks shairport's own hook timeout — eliminating the old "drops and rejoins" retry loop. A failed join just logs and disconnects; start the next AirPlay session to retry.
+- **Bot appears "deafened" in the channel UI even when audio is playing correctly**:
+  Intentional. pinstrel is a play-only bot; it joins with `deaf=true` so Discord knows it won't receive audio. The "deafened" UI badge is the visual side-effect of that optimization and does not affect sending.
+- **A leaked goroutine blocks on FIFO open after a handshake failure**:
+  If the voice join fails before shairport opens the audio FIFO for writing, the background goroutine that opened the FIFO for reading is stuck on `os.OpenFile` (FIFO opens block until a writer connects). It is not cancelled automatically — there's no portable way to interrupt a blocking FIFO open in Go — and exits naturally when shairport next opens the writer side or when the daemon process exits. It holds only an FD slot, no Discord state. Acceptable tradeoff given how rare the path is in practice.
 - **No AirPlay entry appears, but the bot joined Discord**:
   This means `shairport-sync`/`avahi-daemon` failed to advertise via mDNS while the Discord daemon (a separate TCP path to Discord's gateway) succeeded. Check `docker logs` for `couldn't create avahi client: Daemon not running!`, `Could not establish mDNS advertisement!`, or the entrypoint's `ERROR: UDP 5353 is already bound`. The usual cause is the host's `avahi-daemon` still holding UDP 5353 (often because `avahi-daemon.socket` is still active-listening after only `systemctl stop avahi-daemon` was run). See the [CAUTION](#4-running-with-docker) in Section 4 — apply `systemctl stop/disable/mask avahi-daemon avahi-daemon.socket` on the host, verify `sudo ss -lunp | grep :5353` prints nothing, then restart the container. Note: the container now refuses to start at all if 5353 is taken, so an explicit pre-flight error in `docker logs` confirms this is your problem.
