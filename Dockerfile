@@ -1,7 +1,7 @@
 # ==========================================
 # Build Stage
 # ==========================================
-FROM golang:1.21-bookworm AS builder
+FROM golang:bookworm AS builder
 
 # Install build dependencies for CGO and libopus
 RUN apt-get update && apt-get install -y --no-install-recommends \
