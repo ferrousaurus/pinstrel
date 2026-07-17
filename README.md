@@ -161,6 +161,31 @@ sudo systemctl enable pinstrel
 sudo systemctl start pinstrel
 ```
 
+### Step 3.5: Maintenance — discordgo fork pin (DAVE / E2EE)
+
+pinstrel depends on a fork of `github.com/bwmarrin/discordgo` until upstream merges DAVE (Discord voice E2EE) support. The fork is pinned at a specific commit SHA in `go.mod` via a `replace` directive:
+
+```
+replace github.com/bwmarrin/discordgo => github.com/yeongaori/discordgo v0.0.0-20260321152711-3d3293e4c765
+```
+
+This pin points at the head commit of [upstream PR #1704 ("Add E2EE (DAVE) Support")](https://github.com/bwmarrin/discordgo/pull/1704). Without it, Discord rejects the voice WS handshake with close code `4017: E2EE/DAVE protocol required` (enforced globally since March 1st, 2026 — see [Discord docs](https://discord.com/developers/docs/topics/voice-connections#end-to-end-encryption-dave-protocol)). The fork is pure-Go (the only new transitive dep is `github.com/cloudflare/circl` for MLS primitives — no new system/C libraries are required on the Pi).
+
+**Quick check — am I on the DAVE-capable fork?**
+
+```bash
+grep -A2 '^replace' go.mod
+go list -m github.com/bwmarrin/discordgo
+```
+
+The first should print the `replace` line above; the second should resolve `github.com/bwmarrin/discordgo` to `github.com/yeongaori/discordgo v0.0.0-20260321152711-3d3293e4c765`.
+
+**Update policy:**
+
+- Follow [PR #1704](https://github.com/bwmarrin/discordgo/pull/1704) for upstream merge + any subsequent DAVE fixes. The fork's `dev` branch is the active PR head.
+- To bump the pin to a newer commit on `yeongaori/dev` (e.g. for a DAVE fix): update the SHA in the `replace` line, run `go mod tidy`, `go build`, redeploy.
+- **When PR #1704 merges into `bwmarrin/discordgo` master and is released as a tag**: delete the `replace` line from `go.mod`, run `go mod tidy` (which will resolve to the tagged upstream release), `go build`, redeploy. The pinstrel source code itself is unchanged either way — the fork preserves the public discordgo API (`ChannelVoiceJoin`, `Speaking`, `Disconnect`, `OpusSend`, `VoiceServerUpdate`, etc.) so pinstrel doesn't need any edits at swap-back time.
+
 ---
 
 ## How It Works Under the Hood
@@ -194,15 +219,54 @@ sudo systemctl start pinstrel
 - **`could not connect to pinstrel daemon ... no such file or directory` from shairport-sync**:
   Almost always means the pinstrel systemd unit has `PrivateTmp=true` enabled (or another form of `/tmp` isolation). A private `/tmp` makes both `/tmp/pinstrel.sock` and the audio FIFO `/tmp/shairport-sync-audio` invisible to `shairport-sync`, which runs in the host `/tmp` namespace. The shipped `pinstrel.service` deliberately omits `PrivateTmp`; do not re-add it. If you customized the unit, remove `PrivateTmp=true` and run `sudo systemctl daemon-reload && sudo systemctl restart pinstrel`.
 - **Bot joins but stays deafened and `ERR: failed to join voice channel: timeout waiting for voice` appears in shairport-sync logs**:
-  This is Discord's voice WS/UDP handshake failing to complete within discordgo's ~10s internal `waitUntilConnected` poll, surfaced to the shairport hook as an error. The full handshake is: gateway `VOICE_STATE_UPDATE` (discordgo gets the bot's `session_id`) -> `VOICE_SERVER_UPDATE` (discordgo gets the voice endpoint + token, opens the voice WS) -> voice WS `OP2` READY (discordgo gets SSRC + UDP port, opens the UDP socket, does IP discovery) -> `Select Protocol` (discordgo tells Discord the encryption mode). A stall at any stage yields `timeout waiting for voice`.
+  This is the symptom you'll see if the Discord voice WS/UDP handshake doesn't complete within discordgo's ~10s internal `waitUntilConnected` poll. As of pinstrel's DAVE migration (see the **Maintenance** section below) and the async-start architecture, the daemon returns `OK` to shairport's `run_this_before_play_begins` hook *before* the handshake completes — so a handshake failure no longer blocks shairport's own hook timeout, and the old "drops and rejoins every ~25s" retry loop is gone. What you'll see instead is one clean failed join + disconnect per AirPlay attempt, with the underlying cause visible in `sudo journalctl -u pinstrel -f`.
 
-  Symptom patterns to look for in `sudo journalctl -u pinstrel -f` (with the daemon's discordgo `LogLevel = LogInformational`):
+  ### Root cause: Discord's DAVE (E2EE) enforcement
+
+  Since **March 1st, 2026**, Discord enforces end-to-end encryption on **all** audio/video conversations — DMs, group DMs, voice channels, and Go Live streams. Bots that don't implement the DAVE protocol are rejected at the voice WS handshake with the literal close code:
+
+  ```
+  voice endpoint <endpoint> websocket closed unexpectedly,
+    websocket: close 4017: E2EE/DAVE protocol required
+  ```
+
+  followed ~10s later by `timeout waiting for voice`. This is **not** a UDP issue, a network issue, or a Select Protocol mode issue — Discord now mandates MLS-based end-to-end encryption on the voice gateway itself. There is no per-channel or per-bot opt-out; the bot must implement DAVE. See <https://discord.com/developers/docs/topics/voice-connections#end-to-end-encryption-dave-protocol>.
+
+  Upstream `github.com/bwmarrin/discordgo` does **not** implement DAVE as of the most recent `master` commit. pinstrel therefore pins a DAVE-capable fork (`yeongaori/dev`, the head of upstream PR [#1704](https://github.com/bwmarrin/discordgo/pull/1704) — "Add E2EE (DAVE) Support") via a `go.mod` `replace` directive. See the **Maintenance** section below.
+
+  ### What `4017` looks like in the logs
+
+  If you see these two lines together, you are running a non-DAVE build of discordgo — the `replace` directive in `go.mod` is missing or pinned to a stale commit:
+
+  ```
+  ... [DG0] voice.go:407:wsListen() voice endpoint c-ord16-... discord.media:443
+      websocket closed unexpectedly, websocket: close 4017: E2EE/DAVE protocol required
+  ... [DG1] wsapi.go:752:ChannelVoiceJoin() error waiting for voice to connect, timeout waiting for voice
+  ```
+
+  ### How to fix
+
+  1. Verify you're on the DAVE-capable fork: `grep -A2 '^replace' go.mod` should print a line resolving `github.com/bwmarrin/discordgo` to `github.com/yeongaori/discordgo v0.0.0-20260321152711-3d3293e4c765` (or newer).
+  2. If it's missing or stale, restore it from the `go.mod` in this repo's `main` branch.
+  3. Rebuild and redeploy: `make && sudo cp pinstrel /usr/local/bin/ && sudo systemctl restart pinstrel`.
+  4. Confirm the handshake now completes — you should see (in order):
+     - pinstrel `Joining Discord voice channel ... (async; deadline 30s)`
+     - pinstrel `VOICE_STATE_UPDATE` for the bot (with a non-empty `session_id`)
+     - pinstrel `VOICE_SERVER_UPDATE: ... endpoint=... token_present=true`
+     - discordgo `connecting to voice endpoint wss://...` — the WS identify now includes `max_dave_protocol_version: 1`
+     - discordgo DAVE/MLS handshake lines (Prepare Epoch, MLS Key Package, MLS Welcome, etc.)
+     - discordgo `connecting to udp addr ...` + IP-discovery reply
+     - discordgo OP4 Session Description (with `dave_protocol_version: 1`)
+     - pinstrel `ChannelVoiceJoin returned in Xs (err=<nil>)`
+     - audio flows.
+
+  ### Other patterns (now rarely the cause)
+
+  These remain valid diagnoses if the `4017` line is **not** what you're seeing:
+
   - **`VOICE_STATE_UPDATE` never logged for the bot** → gateway never dispatched, or `s.State.User.ID` is unpopulated. Verify the bot token is correct and that the bot is in the server.
   - **`VOICE_SERVER_UPDATE` never logged** → the bot lacks `Connect`/`Speak`/`Use Voice Activity` permissions on the target channel (see Section 1 step 5), or the channel id is wrong.
-  - **`connecting to udp addr ...` logged, then nothing** → UDP IP-discovery reply dropped (most often because discordgo v0.29.0 advertised the deprecated `xsalsa20_poly1305` Select Protocol mode that modern Discord voice servers reject). pinstrel now tracks discordgo `master`, which advertises `aead_aes256_gcm_rtpsize`; if you've pinned an older commit, re-run `go get github.com/bwmarrin/discordgo@master && go build && sudo cp pinstrel /usr/local/bin/`.
-  - **`Voice join exceeded ... deadline — abandoning`** from pinstrel itself (not from discordgo) → the handshake stalled longer than `VOICE_READY_TIMEOUT` (default 30s). The bot is auto-disconnected (gateway nil-channel OP4) so no "ghost" lingers; raise the timeout only if you have evidence of legitimately slow voice-server rotation.
-
-  Architecturally, the daemon returns `OK` to shairport's `run_this_before_play_begins` hook *before* the handshake completes, so a handshake failure no longer blocks shairport's own hook timeout — eliminating the old "drops and rejoins" retry loop. A failed join just logs and disconnects; start the next AirPlay session to retry.
+  - **`Voice join exceeded ... deadline — abandoning`** from pinstrel itself (not from discordgo) → the handshake stalled longer than `VOICE_READY_TIMEOUT` (default 30s). The bot is auto-disconnected (gateway nil-channel OP4) so no "ghost" lingers; raise the timeout only if you have evidence of legitimately slow voice-server rotation or a slow MLS group setup on a very busy channel.
 - **Bot appears "deafened" in the channel UI even when audio is playing correctly**:
   Intentional. pinstrel is a play-only bot; it joins with `deaf=true` so Discord knows it won't receive audio. The "deafened" UI badge is the visual side-effect of that optimization and does not affect sending.
 - **A leaked goroutine blocks on FIFO open after a handshake failure**:
