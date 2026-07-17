@@ -67,8 +67,59 @@ _Note: If your system's package manager version of `shairport-sync` is outdated 
 Clone this repository to your Raspberry Pi (or copy the files) and build:
 
 ```bash
-go build -o pinstrel
+make
 ```
+
+This runs `go build -trimpath -ldflags '-s -w' -o pinstrel .` — stripping DWARF
+and symbol tables. The strip is important on the Pi: the default Go build keeps
+full debug info, and the link stage pre-allocates enough address space for it
+that a Pi Zero 2 W (512 MB RAM, no swap by default) fails with:
+
+```
+…/link: mapping output file failed: cannot allocate memory
+```
+
+If `make` still fails with that error, you have two robust alternatives —
+pick whichever is easier:
+
+1. **Add swap on the Pi (canonical fix, ~1 minute):**
+
+   ```bash
+   sudo fallocate -l 2G /swapfile
+   sudo chmod 600 /swapfile
+   sudo mkswap /swapfile
+   sudo swapon /swapfile
+   echo '/swapfile none swap sw 0 0' | sudo tee -a /etc/fstab
+   make
+   ```
+
+   This gives the linker the slack it needs to `mmap` the output file. Swap is
+   persistent across reboots via the `fstab` entry; remove it later with
+   `sudo swapoff /swapfile && sudo rm /swapfile` and the corresponding
+   `fstab` line if you don't want it permanent.
+
+2. **Cross-compile from a more powerful machine** (your Mac, or any host with
+   more than ~2 GB of free RAM). Use the provided Makefile targets:
+
+   ```bash
+   # arm64 Raspberry Pi (Pi 3 / 4 / 5 / Zero 2 W in 64-bit mode):
+   make pi-arm64    # needs `gcc-aarch64-linux-gnu` (Debian: apt-get install gcc-aarch64-linux-gnu)
+
+   # 32-bit armv7 Pi (Pi Zero W, original Pi):
+   make pi-arm      # needs `gcc-arm-linux-gnueabihf` (Debian: apt-get install gcc-arm-linux-gnueabihf)
+   ```
+
+   Then copy the resulting `pinstrel` binary onto the Pi (e.g. `scp pinstrel pi:/tmp/`).
+
+   macOS note: the `gcc-aarch64-linux-gnu`/`gcc-arm-linux-gnueabihf` cross
+   toolchains aren't easy to install via Homebrew. The fastest path is to run
+   the cross-build in a Linux container on the Mac, then `scp` the binary to
+   the Pi:
+
+   ```bash
+   docker run --rm -v "$PWD:/src" -w /src golang:1.26 \
+       sh -c 'apt-get update && apt-get install -y gcc-aarch64-linux-gnu && make pi-arm64'
+   ```
 
 ### Step 3.2: Install the CLI and Daemon
 
