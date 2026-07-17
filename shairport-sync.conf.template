@@ -1,0 +1,23 @@
+// Shairport Sync Configuration Template for Pinstral
+// Recommended location: /etc/shairport-sync.conf
+
+general = {
+  name = "Pinstral AirPlay";   // The name that will show up on your iOS/Mac AirPlay menu
+  output_backend = "pipe";     // Route audio to the named pipe
+};
+
+sessioncontrol = {
+  // Hooks called when playback starts and ends
+  run_this_before_play_begins = "/usr/local/bin/pinstral start";
+  run_this_after_play_ends = "/usr/local/bin/pinstral stop";
+  
+  // Timeout in seconds after audio stops before the session officially ends
+  session_timeout = 10;
+};
+
+pipe = {
+  name = "/tmp/shairport-sync-audio";  // Named pipe path (must match pinstral config.toml)
+  output_rate = 48000;                 // Match Discord's required sample rate
+  output_format = "S16_LE";            // 16-bit Signed Little-Endian PCM
+  output_channels = 2;                 // Stereo
+};
