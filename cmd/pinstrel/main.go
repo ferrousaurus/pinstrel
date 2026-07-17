@@ -1,9 +1,17 @@
+// Command pinstrel is the AirPlay-to-Discord streaming daemon and CLI.
+// It has three subcommands: daemon (long-running), start/stop (one-shot IPC
+// clients invoked by shairport-sync hooks).
 package main
 
 import (
 	"fmt"
 	"log"
 	"os"
+
+	"pinstrel/internal/config"
+	"pinstrel/internal/daemon"
+	"pinstrel/internal/ipc"
+	"pinstrel/internal/voice"
 )
 
 // configPath is the single canonical location of the pinstrel TOML config.
@@ -19,33 +27,30 @@ Commands:
   stop      Signal the daemon to stop streaming and leave voice
 `
 
-func daemon(cfg *Config) {
-	if cfg.DiscordToken == "" {
-		log.Fatal("Error: DISCORD_TOKEN is required in config for daemon mode")
+func runDaemon(cfg *config.Config) {
+	v, err := voice.New(cfg.DiscordToken)
+	if err != nil {
+		log.Fatalf("Error initializing Discord session: %v", err)
 	}
-	if cfg.ChannelID == "" {
-		log.Fatal("Error: DISCORD_CHANNEL_ID is required in config for daemon mode")
-	}
-
-	d, err := NewDaemon(cfg)
+	d, err := daemon.New(cfg, v)
 	if err != nil {
 		log.Fatalf("Error initializing daemon: %v", err)
 	}
-	if err := d.Start(); err != nil {
+	if err := d.Run(); err != nil {
 		log.Fatalf("Daemon runtime error: %v", err)
 	}
 }
 
-func start(cfg *Config) {
+func runStart(cfg *config.Config) {
 	log.Printf("Sending start command to daemon socket: %s", cfg.SocketPath)
-	if err := SendIPCCommand(cfg.SocketPath, "start"); err != nil {
+	if err := ipc.Send(cfg.SocketPath, "start"); err != nil {
 		log.Fatalf("CLI Error: %v", err)
 	}
 }
 
-func stop(cfg *Config) {
+func runStop(cfg *config.Config) {
 	log.Printf("Sending stop command to daemon socket: %s", cfg.SocketPath)
-	if err := SendIPCCommand(cfg.SocketPath, "stop"); err != nil {
+	if err := ipc.Send(cfg.SocketPath, "stop"); err != nil {
 		log.Fatalf("CLI Error: %v", err)
 	}
 }
@@ -57,18 +62,18 @@ func main() {
 	}
 
 	log.Printf("Loading pinstrel configuration from: %s", configPath)
-	cfg, err := LoadConfig(configPath)
+	cfg, err := config.LoadConfig(configPath)
 	if err != nil {
 		log.Fatalf("Error loading pinstrel configuration from %s: %v", configPath, err)
 	}
 
 	switch os.Args[1] {
 	case "daemon":
-		daemon(cfg)
+		runDaemon(cfg)
 	case "start":
-		start(cfg)
+		runStart(cfg)
 	case "stop":
-		stop(cfg)
+		runStop(cfg)
 	default:
 		fmt.Print(usage)
 		os.Exit(1)

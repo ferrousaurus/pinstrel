@@ -67,7 +67,7 @@ jobs:
           GOOS: linux
           GOARCH: arm64
         run: |
-          go build -trimpath -ldflags "-s -w" -o pinstrel .
+          go build -trimpath -ldflags "-s -w" -o pinstrel ./cmd/pinstrel
         shell: bash
 
       - name: Compress artifact

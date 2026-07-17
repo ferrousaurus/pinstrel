@@ -51,7 +51,7 @@ _Note: If your system's package manager version of `shairport-sync` is outdated 
 
 1. Copy the template configuration `shairport-sync.conf.template` from this repo to `/etc/shairport-sync.conf`:
    ```bash
-   sudo cp shairport-sync.conf.template /etc/shairport-sync.conf
+   sudo cp configs/shairport-sync.conf.template /etc/shairport-sync.conf
    ```
 2. Restart `shairport-sync`:
    ```bash
@@ -109,7 +109,7 @@ pick whichever is easier:
    make pi-arm      # needs `gcc-arm-linux-gnueabihf` (Debian: apt-get install gcc-arm-linux-gnueabihf)
    ```
 
-   Then copy the resulting `pinstrel` binary onto the Pi (e.g. `scp pinstrel pi:/tmp/`).
+   Then copy the resulting `pinstrel` binary onto the Pi (e.g. `scp dist/pinstrel pi:/tmp/`).
 
    macOS note: the `gcc-aarch64-linux-gnu`/`gcc-arm-linux-gnueabihf` cross
    toolchains aren't easy to install via Homebrew. The fastest path is to run
@@ -126,7 +126,7 @@ pick whichever is easier:
 Move the built binary to `/usr/local/bin` so it is globally available and accessible by `shairport-sync` hooks:
 
 ```bash
-sudo cp pinstrel /usr/local/bin/
+sudo cp dist/pinstrel /usr/local/bin/
 ```
 
 ### Step 3.3: Configuration File
@@ -155,7 +155,7 @@ VOICE_READY_TIMEOUT = 30
 Copy the systemd service file to the system config and enable it:
 
 ```bash
-sudo cp pinstrel.service /etc/systemd/system/
+sudo cp deployments/systemd/pinstrel.service /etc/systemd/system/
 sudo systemctl daemon-reload
 sudo systemctl enable pinstrel
 sudo systemctl start pinstrel
@@ -248,7 +248,7 @@ The first should print the `replace` line above; the second should resolve `gith
 
   1. Verify you're on the DAVE-capable fork: `grep -A2 '^replace' go.mod` should print a line resolving `github.com/bwmarrin/discordgo` to `github.com/yeongaori/discordgo v0.0.0-20260321152711-3d3293e4c765` (or newer).
   2. If it's missing or stale, restore it from the `go.mod` in this repo's `main` branch.
-  3. Rebuild and redeploy: `make && sudo cp pinstrel /usr/local/bin/ && sudo systemctl restart pinstrel`.
+   3. Rebuild and redeploy: `make && sudo cp dist/pinstrel /usr/local/bin/ && sudo systemctl restart pinstrel`.
   4. Confirm the handshake now completes — you should see (in order):
      - pinstrel `Joining Discord voice channel ... (async; deadline 30s)`
      - pinstrel `VOICE_STATE_UPDATE` for the bot (with a non-empty `session_id`)

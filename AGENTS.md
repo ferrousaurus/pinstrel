@@ -6,23 +6,25 @@ what is non-obvious or easy to get wrong.
 ## What this is
 
 `pinstrel` is a single-module Go daemon + CLI that streams AirPlay audio
-(captured by `shairport-sync` into a FIFO) to a Discord voice channel, Opus-encoded via CGO. Target host is a Raspberry Pi Zero 2 W. Flat layout:
-everything is `package main` in the repo root.
+(captured by `shairport-sync` into a FIFO) to a Discord voice channel, Opus-encoded via CGO. Target host is a Raspberry Pi Zero 2 W. Layout follows the
+idiomatic Go `cmd/` + `internal/` pattern:
 
-- `main.go` — subcommand dispatch: `daemon` (long-running), `start`/`stop` (one-shot IPC clients invoked by shairport-sync hooks).
-- `daemon.go` — Discord session, Unix-socket IPC server, Opus encoder, FIFO reader. ~500 lines, the bulk of the logic.
-- `cli.go` — `SendIPCCommand` over `net.Dial("unix", …)`.
-- `config.go` / `config_test.go` — TOML loader, plus the only tests in the repo.
-- `Makefile`, `pinstrel.service`, `shairport-sync.conf.template` — deploy artifacts.
+- `cmd/pinstrel/main.go` — subcommand dispatch: `daemon` (long-running), `start`/`stop` (one-shot IPC clients invoked by shairport-sync hooks).
+- `internal/daemon/` — the stream lifecycle state machine; orchestrates voice join, pipe read, Opus send, and cleanup. Implements `ipc.CommandHandler`.
+- `internal/voice/` — `voice.Session` / `voice.Connection` interfaces + a `*discordgo.Session` adapter. The narrow interface makes `streamLoop` testable without a live Discord connection.
+- `internal/ipc/` — Unix-socket server (`CommandHandler` interface) + `Send` one-shot client used by `start`/`stop`.
+- `internal/audio/` — Opus encoder wrapper + pure `DecodePCMFrame` + frame constants.
+- `internal/config/` — TOML loader (`config.go` / `config_test.go`).
+- `deployments/systemd/pinstrel.service`, `configs/shairport-sync.conf.template` — deploy artifacts.
 
 Audio path: shairport-sync → `/tmp/shairport-sync-audio` FIFO (48kHz S16LE stereo) → pinstrel Opus-encodes → Discord voice UDP. The daemon also listens on `/tmp/pinstrel.sock` for `start`/`stop` from shairport hooks.
 
 ## Build & verify
 
 ```bash
-make                 # go build -trimpath -ldflags '-s -w' -> ./dist/pinstrel (NOT ./pinstrel)
+make                 # go build -trimpath -ldflags '-s -w' -> ./dist/pinstrel
 make test            # go vet ./... && go test ./...
-go test -run TestLoadConfig ./...   # run a single test (only config_test.go exists)
+go test ./internal/config/...   # run a single package's tests
 ```
 
 The Makefile's `-s -w` strip is load-bearing on the Pi: without it the linker
@@ -49,14 +51,15 @@ Toolchain version pinned in `go.mod`: `go 1.26.5`.
 ## Gotchas that bite
 
 - **There is no `--config` flag.** pinstrel is a system daemon wired to a
-  fixed config path (`/etc/pinstrel.toml`, hard-coded in `main.go`). A missing
-  file is a hard error — `LoadConfig` does not silently substitute defaults.
-  For local dev, point your shell at a temp config by editing `configPath` in
-  `main.go` or symlink `/etc/pinstrel.toml` to your working copy.
+  fixed config path (`/etc/pinstrel.toml`, hard-coded in `cmd/pinstrel/main.go`).
+  A missing file is a hard error — `LoadConfig` does not silently substitute
+  defaults. For local dev, point your shell at a temp config by editing
+  `configPath` in `cmd/pinstrel/main.go` or symlink `/etc/pinstrel.toml` to
+  your working copy.
 - **`config.toml` (in the repo root) is gitignored and not tracked.** The
   working copy here happens to contain a live Discord token — do not commit it,
   do not paste it into commits/PRs, and don't add a tracked sample that mirrors
-  its real values. Config schema is documented in README §3.3 and `config.go`.
+  its real values. Config schema is documented in README §3.3 and `internal/config/config.go`.
 - **Do not remove the `replace` directive in `go.mod`.** It pins a DAVE
   (Discord voice E2EE) fork of `github.com/bwmarrin/discordgo`
   (`yeongaori/discordgo …3d3293e4c765`, head of upstream PR #1704). Without it,
@@ -64,7 +67,7 @@ Toolchain version pinned in `go.mod`: `go 1.26.5`.
   since March 1, 2026). Swap-back instructions are in README §3.5 — only do it
   when PR #1704 merges upstream. `go mod tidy` is safe; never let it delete
   the `replace` line while the pin is still needed.
-- **Do not re-add `PrivateTmp=true` to `pinstrel.service`.** Both the IPC
+- **Do not re-add `PrivateTmp=true` to `deployments/systemd/pinstrel.service`.** Both the IPC
   socket (`/tmp/pinstrel.sock`) and the audio FIFO live in `/tmp` and must be
   visible to `shairport-sync`, which runs in the host `/tmp` namespace. The
   service deliberately hardens everything *except* `/tmp` isolation.
@@ -79,7 +82,8 @@ Toolchain version pinned in `go.mod`: `go 1.26.5`.
   voice join fails before shairport opens the writer side. Go has no portable
   way to interrupt a blocking FIFO `open`. This is a known accepted tradeoff
   (holds only an FD slot, no Discord state); do not "fix" it by adding
-  cancellable openers without understanding why the comment in `daemon.go`
+  cancellable openers without understanding why the comment in
+  `internal/daemon/daemon.go`
   says it can't be done portably.
 
 ## CI
@@ -92,4 +96,4 @@ Releases are auto-tagged `vYYYYMMDD-<run_number>` unless a tag is supplied.
 
 ## Deploy recap (Pi)
 
-`sudo cp dist/pinstrel /usr/local/bin/` → `sudo cp pinstrel.service /etc/systemd/system/` → `daemon-reload && enable && start pinstrel`. See README for the full flow; the service file's `ExecStart` already points at `/etc/pinstrel.toml`.
+`sudo cp dist/pinstrel /usr/local/bin/` → `sudo cp deployments/systemd/pinstrel.service /etc/systemd/system/` → `daemon-reload && enable && start pinstrel`. See README for the full flow; the service file's `ExecStart` is `pinstrel daemon` (no flags — config path is hard-coded to `/etc/pinstrel.toml`).

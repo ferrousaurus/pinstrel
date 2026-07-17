@@ -1,4 +1,4 @@
-package main
+package config
 
 import (
 	"fmt"
@@ -8,11 +8,11 @@ import (
 )
 
 const (
-	// defaultVoiceReadyTimeout is the deadline (in seconds) for the Discord
+	// DefaultVoiceReadyTimeout is the deadline (in seconds) for the Discord
 	// voice WS/UDP handshake before pinstrel abandons the join. Referenced by
-	// both DefaultConfig (the TOML default) and the streamLoop guard (which
-	// catches a misconfigured 0/negative value) so the two can't drift.
-	defaultVoiceReadyTimeout = 30
+	// both DefaultConfig (the TOML default) and the daemon's streamLoop guard
+	// (which catches a misconfigured 0/negative value) so the two can't drift.
+	DefaultVoiceReadyTimeout = 30
 )
 
 // Config holds the application configuration.
@@ -32,7 +32,7 @@ func DefaultConfig() *Config {
 		Bitrate:           128000,
 		PipePath:          "/tmp/shairport-sync-audio",
 		SocketPath:        "/tmp/pinstrel.sock",
-		VoiceReadyTimeout: defaultVoiceReadyTimeout,
+		VoiceReadyTimeout: DefaultVoiceReadyTimeout,
 	}
 }
 
