@@ -16,9 +16,9 @@ RestartSec=5
 
 # Hardening that is safe given pinstrel's needs:
 #   - network: required for Discord gateway
-#   - /tmp:    used for the IPC socket and audio FIFO
+#   - /tmp:    used for the IPC socket and audio FIFO (shared with shairport-sync,
+#              so PrivateTmp must NOT be enabled here)
 NoNewPrivileges=true
-PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=true
 ReadWritePaths=/tmp
