@@ -2,7 +2,7 @@
 // Recommended location: /etc/shairport-sync.conf
 
 general = {
-  name = "pinstrel AirPlay";   // The name that will show up on your iOS/Mac AirPlay menu
+  name = "Pinstrel";   // The name that will show up on your iOS/Mac AirPlay menu
   output_backend = "pipe";     // Route audio to the named pipe
 };
 
