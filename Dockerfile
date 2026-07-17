@@ -20,7 +20,7 @@ RUN go mod download
 COPY . .
 
 # Build the application with CGO enabled (required for opus bindings)
-RUN CGO_ENABLED=1 GOOS=linux go build -o pinstral .
+RUN CGO_ENABLED=1 GOOS=linux go build -o pinstrel .
 
 # ==========================================
 # Runtime Stage
@@ -43,7 +43,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 RUN sed -i 's/^[#]*enable-dbus=.*/enable-dbus=no/' /etc/avahi/avahi-daemon.conf
 
 # Copy binary and configuration files
-COPY --from=builder /app/pinstral /usr/local/bin/pinstral
+COPY --from=builder /app/pinstrel /usr/local/bin/pinstrel
 COPY --from=builder /app/shairport-sync.conf.template /etc/shairport-sync.conf.template
 COPY --from=builder /app/docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 
@@ -55,7 +55,7 @@ ENV DISCORD_TOKEN="" \
     DISCORD_CHANNEL_ID="" \
     BITRATE=128000 \
     PIPE_PATH="/tmp/shairport-sync-audio" \
-    SOCKET_PATH="/tmp/pinstral.sock"
+    SOCKET_PATH="/tmp/pinstrel.sock"
 
 # Expose default AirPlay ports
 # Note: For reliable mDNS/AirPlay discovery, running the container

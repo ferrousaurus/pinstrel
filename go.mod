@@ -1,4 +1,4 @@
-module pinstral
+module pinstrel
 
 go 1.26.5
 

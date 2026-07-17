@@ -17,7 +17,7 @@ func main() {
 
 	// Set up command-specific flag sets
 	fs := flag.NewFlagSet(subcommand, flag.ExitOnError)
-	configPath := fs.String("config", "config.toml", "path to pinstral TOML configuration file")
+	configPath := fs.String("config", "config.toml", "path to pinstrel TOML configuration file")
 
 	// Parse flags ignoring the subcommand
 	if err := fs.Parse(os.Args[2:]); err != nil {
@@ -26,12 +26,12 @@ func main() {
 
 	// Elegant path fallback:
 	// If the default "config.toml" does not exist locally,
-	// check if "/etc/pinstral.toml" exists and use it as a fallback.
+	// check if "/etc/pinstrel.toml" exists and use it as a fallback.
 	resolvedPath := *configPath
 	if resolvedPath == "config.toml" {
 		if _, err := os.Stat("config.toml"); os.IsNotExist(err) {
-			if _, err := os.Stat("/etc/pinstral.toml"); err == nil {
-				resolvedPath = "/etc/pinstral.toml"
+			if _, err := os.Stat("/etc/pinstrel.toml"); err == nil {
+				resolvedPath = "/etc/pinstrel.toml"
 			}
 		}
 	}
@@ -55,7 +55,7 @@ func main() {
 			log.Fatalf("Error initializing daemon: %v", err)
 		}
 
-		log.Printf("Starting pinstral daemon using config: %s", resolvedPath)
+		log.Printf("Starting pinstrel daemon using config: %s", resolvedPath)
 		if err := daemon.Start(); err != nil {
 			log.Fatalf("Daemon runtime error: %v", err)
 		}
@@ -79,11 +79,11 @@ func main() {
 }
 
 func printUsage() {
-	fmt.Println("Usage: pinstral <command> [options]")
+	fmt.Println("Usage: pinstrel <command> [options]")
 	fmt.Println("\nCommands:")
 	fmt.Println("  daemon    Start the background streaming daemon")
 	fmt.Println("  start     Signal the daemon to join voice and start streaming")
 	fmt.Println("  stop      Signal the daemon to stop streaming and leave voice")
 	fmt.Println("\nOptions:")
-	fmt.Println("  --config  Path to config.toml (default: config.toml, fallback: /etc/pinstral.toml)")
+	fmt.Println("  --config  Path to config.toml (default: config.toml, fallback: /etc/pinstrel.toml)")
 }

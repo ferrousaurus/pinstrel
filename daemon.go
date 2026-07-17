@@ -75,7 +75,7 @@ func (d *Daemon) Start() error {
 		log.Printf("Warning: failed to chmod socket %s: %v", d.config.SocketPath, err)
 	}
 
-	log.Printf("pinstral daemon started. Socket: %s", d.config.SocketPath)
+	log.Printf("pinstrel daemon started. Socket: %s", d.config.SocketPath)
 
 	for {
 		conn, err := listener.Accept()

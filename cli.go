@@ -5,11 +5,11 @@ import (
 	"net"
 )
 
-// SendIPCCommand sends a command to the pinstral daemon via Unix domain socket.
+// SendIPCCommand sends a command to the pinstrel daemon via Unix domain socket.
 func SendIPCCommand(socketPath, cmd string) error {
 	conn, err := net.Dial("unix", socketPath)
 	if err != nil {
-		return fmt.Errorf("could not connect to pinstral daemon at %s: %w. Is the daemon running?", socketPath, err)
+		return fmt.Errorf("could not connect to pinstrel daemon at %s: %w. Is the daemon running?", socketPath, err)
 	}
 	defer conn.Close()
 

@@ -14,8 +14,8 @@ func TestDefaultConfig(t *testing.T) {
 	if cfg.PipePath != "/tmp/shairport-sync-audio" {
 		t.Errorf("Expected default PipePath to be /tmp/shairport-sync-audio, got %s", cfg.PipePath)
 	}
-	if cfg.SocketPath != "/tmp/pinstral.sock" {
-		t.Errorf("Expected default SocketPath to be /tmp/pinstral.sock, got %s", cfg.SocketPath)
+	if cfg.SocketPath != "/tmp/pinstrel.sock" {
+		t.Errorf("Expected default SocketPath to be /tmp/pinstrel.sock, got %s", cfg.SocketPath)
 	}
 }
 
@@ -30,7 +30,7 @@ func TestLoadConfig(t *testing.T) {
 	}
 
 	// Test loading valid TOML config
-	tmpDir, err := os.MkdirTemp("", "pinstral-test")
+	tmpDir, err := os.MkdirTemp("", "pinstrel-test")
 	if err != nil {
 		t.Fatalf("Failed to create temp dir: %v", err)
 	}

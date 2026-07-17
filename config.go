@@ -20,7 +20,7 @@ func DefaultConfig() *Config {
 	return &Config{
 		Bitrate:    128000,
 		PipePath:   "/tmp/shairport-sync-audio",
-		SocketPath: "/tmp/pinstral.sock",
+		SocketPath: "/tmp/pinstrel.sock",
 	}
 }
 

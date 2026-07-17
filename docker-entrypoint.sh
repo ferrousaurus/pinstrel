@@ -1,23 +1,23 @@
 #!/bin/bash
 set -e
 
-# Generate /etc/pinstral.toml from environment variables if not already present
-if [ ! -f /etc/pinstral.toml ]; then
+# Generate /etc/pinstrel.toml from environment variables if not already present
+if [ ! -f /etc/pinstrel.toml ]; then
   if [ -n "$DISCORD_TOKEN" ] && [ -n "$DISCORD_CHANNEL_ID" ]; then
-    echo "Generating /etc/pinstral.toml from environment variables..."
-    cat <<EOF > /etc/pinstral.toml
+    echo "Generating /etc/pinstrel.toml from environment variables..."
+    cat <<EOF > /etc/pinstrel.toml
 DISCORD_TOKEN = "${DISCORD_TOKEN}"
 DISCORD_CHANNEL_ID = "${DISCORD_CHANNEL_ID}"
 BITRATE = ${BITRATE:-128000}
 PIPE_PATH = "${PIPE_PATH:-/tmp/shairport-sync-audio}"
-SOCKET_PATH = "${SOCKET_PATH:-/tmp/pinstral.sock}"
+SOCKET_PATH = "${SOCKET_PATH:-/tmp/pinstrel.sock}"
 EOF
   else
-    echo "ERROR: /etc/pinstral.toml not found, and DISCORD_TOKEN/DISCORD_CHANNEL_ID environment variables are not set."
+    echo "ERROR: /etc/pinstrel.toml not found, and DISCORD_TOKEN/DISCORD_CHANNEL_ID environment variables are not set."
     exit 1
   fi
 else
-  echo "Using existing /etc/pinstral.toml config file."
+  echo "Using existing /etc/pinstrel.toml config file."
 fi
 
 # Ensure Shairport Sync configuration exists
@@ -39,10 +39,10 @@ chown -R avahi:avahi /var/run/avahi-daemon || true
 echo "Starting avahi-daemon..."
 avahi-daemon --no-rlimits --no-drop-root --daemonize
 
-# Start pinstral daemon in the background
-echo "Starting pinstral daemon..."
-/usr/local/bin/pinstral daemon --config /etc/pinstral.toml &
-PINSTRAL_PID=$!
+# Start pinstrel daemon in the background
+echo "Starting pinstrel daemon..."
+/usr/local/bin/pinstrel daemon --config /etc/pinstrel.toml &
+pinstrel_PID=$!
 
 # Wait briefly for socket setup
 sleep 1
@@ -55,8 +55,8 @@ SHAIRPORT_PID=$!
 # Monitor processes
 echo "Services started. Monitoring..."
 while true; do
-  if ! kill -0 $PINSTRAL_PID 2>/dev/null; then
-    echo "ERROR: pinstral daemon died."
+  if ! kill -0 $pinstrel_PID 2>/dev/null; then
+    echo "ERROR: pinstrel daemon died."
     exit 1
   fi
   if ! kill -0 $SHAIRPORT_PID 2>/dev/null; then

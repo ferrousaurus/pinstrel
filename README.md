@@ -1,6 +1,6 @@
-# pinstral
+# pinstrel
 
-`pinstral` is a lightweight Go daemon and CLI utility designed to stream AirPlay audio directly to a Discord voice channel. It runs on a Raspberry Pi (optimized for the low-resource Raspberry Pi Zero 2 W) alongside `shairport-sync`.
+`pinstrel` is a lightweight Go daemon and CLI utility designed to stream AirPlay audio directly to a Discord voice channel. It runs on a Raspberry Pi (optimized for the low-resource Raspberry Pi Zero 2 W) alongside `shairport-sync`.
 
 ## Features
 
@@ -60,14 +60,14 @@ _Note: If your system's package manager version of `shairport-sync` is outdated 
 
 ---
 
-## 3. Build & Install Pinstral
+## 3. Build & Install pinstrel
 
 ### Step 3.1: Build the Binary
 
 Clone this repository to your Raspberry Pi (or copy the files) and build:
 
 ```bash
-go build -o pinstral
+go build -o pinstrel
 ```
 
 ### Step 3.2: Install the CLI and Daemon
@@ -75,15 +75,15 @@ go build -o pinstral
 Move the built binary to `/usr/local/bin` so it is globally available and accessible by `shairport-sync` hooks:
 
 ```bash
-sudo cp pinstral /usr/local/bin/
+sudo cp pinstrel /usr/local/bin/
 ```
 
 ### Step 3.3: Configuration File
 
-Create the configuration file at `/etc/pinstral.toml`:
+Create the configuration file at `/etc/pinstrel.toml`:
 
 ```toml
-# /etc/pinstral.toml
+# /etc/pinstrel.toml
 
 DISCORD_TOKEN = "YOUR_DISCORD_BOT_TOKEN"
 DISCORD_CHANNEL_ID = "YOUR_DISCORD_VOICE_CHANNEL_ID"
@@ -91,7 +91,7 @@ DISCORD_CHANNEL_ID = "YOUR_DISCORD_VOICE_CHANNEL_ID"
 # Optional settings (defaults shown below)
 BITRATE = 128000
 PIPE_PATH = "/tmp/shairport-sync-audio"
-SOCKET_PATH = "/tmp/pinstral.sock"
+SOCKET_PATH = "/tmp/pinstrel.sock"
 ```
 
 ### Step 3.4: Install and Enable Systemd Service
@@ -99,33 +99,37 @@ SOCKET_PATH = "/tmp/pinstral.sock"
 Copy the systemd service file to the system config and enable it:
 
 ```bash
-sudo cp pinstral.service /etc/systemd/system/
+sudo cp pinstrel.service /etc/systemd/system/
 sudo systemctl daemon-reload
-sudo systemctl enable pinstral
-sudo systemctl start pinstral
+sudo systemctl enable pinstrel
+sudo systemctl start pinstrel
 ```
 
 ---
 
 ## 4. Running with Docker
 
-Alternatively, you can run both `pinstral` and `shairport-sync` in a single Docker container. This is the recommended approach for clean installations.
+Alternatively, you can run both `pinstrel` and `shairport-sync` in a single Docker container. This is the recommended approach for clean installations.
 
 ### Step 4.1: Build the Image
+
 Build the image locally:
+
 ```bash
-docker build -t pinstral:latest .
+docker build -t pinstrel:latest .
 ```
 
 ### Step 4.2: Run with Docker Compose
+
 Using `docker-compose.yml` is the easiest way to configure and run the container:
+
 ```yaml
-version: '3.8'
+version: "3.8"
 
 services:
-  pinstral:
-    image: pinstral:latest
-    container_name: pinstral
+  pinstrel:
+    image: pinstrel:latest
+    container_name: pinstrel
     network_mode: host
     restart: always
     environment:
@@ -133,47 +137,51 @@ services:
       - DISCORD_CHANNEL_ID=YOUR_DISCORD_VOICE_CHANNEL_ID
       - BITRATE=128000
 ```
+
 Run the service:
+
 ```bash
 docker compose up -d
 ```
 
 ### Step 4.3: Run with Docker CLI
+
 If you prefer standard Docker commands, run:
+
 ```bash
 docker run -d \
-  --name pinstral \
+  --name pinstrel \
   --net=host \
   --restart=always \
   -e DISCORD_TOKEN="YOUR_DISCORD_BOT_TOKEN" \
   -e DISCORD_CHANNEL_ID="YOUR_DISCORD_VOICE_CHANNEL_ID" \
   -e BITRATE=128000 \
-  pinstral:latest
+  pinstrel:latest
 ```
 
 > [!IMPORTANT]
-> **Network Mode Host**: You **must** use `--net=host` (`network_mode: host` in Docker Compose). This allows `avahi-daemon` inside the container to broadcast mDNS discovery packets to your local network, enabling your Apple devices to find the "Pinstral AirPlay" speaker.
+> **Network Mode Host**: You **must** use `--net=host` (`network_mode: host` in Docker Compose). This allows `avahi-daemon` inside the container to broadcast mDNS discovery packets to your local network, enabling your Apple devices to find the "pinstrel AirPlay" speaker.
 
 ---
 
 ## How It Works Under the Hood
 
-1. When you select **Pinstral AirPlay** from your iPhone/Mac audio output menu:
+1. When you select **pinstrel AirPlay** from your iPhone/Mac audio output menu:
    - `shairport-sync` accepts the connection.
-   - `shairport-sync` executes the script hook: `/usr/local/bin/pinstral start`.
-   - The CLI client sends a `start` command to `/tmp/pinstral.sock`.
-   - The `pinstral` daemon joins the voice channel, opens the named pipe `/tmp/shairport-sync-audio`, and begins reading the 48kHz PCM data.
+   - `shairport-sync` executes the script hook: `/usr/local/bin/pinstrel start`.
+   - The CLI client sends a `start` command to `/tmp/pinstrel.sock`.
+   - The `pinstrel` daemon joins the voice channel, opens the named pipe `/tmp/shairport-sync-audio`, and begins reading the 48kHz PCM data.
    - The daemon encodes the PCM data into Opus frames and streams them to Discord.
 2. When you stop AirPlay playback or disconnect:
-   - `shairport-sync` executes the script hook: `/usr/local/bin/pinstral stop` (triggered after the configured `session_timeout` of 10 seconds).
-   - The CLI client sends a `stop` command to `/tmp/pinstral.sock`.
+   - `shairport-sync` executes the script hook: `/usr/local/bin/pinstrel stop` (triggered after the configured `session_timeout` of 10 seconds).
+   - The CLI client sends a `stop` command to `/tmp/pinstrel.sock`.
    - The daemon closes the pipe, stops the streaming loop, and disconnects from the voice channel.
 
 ## Troubleshooting
 
-- **Check logs for pinstral daemon**:
+- **Check logs for pinstrel daemon**:
   ```bash
-  sudo journalctl -u pinstral -f
+  sudo journalctl -u pinstrel -f
   ```
 - **Check logs for shairport-sync**:
   ```bash
@@ -182,4 +190,4 @@ docker run -d \
 - **Test the pipe manually**:
   If the daemon is running but there is no sound, check if audio is actually being written to the pipe by running `cat /tmp/shairport-sync-audio` while AirPlay is active (it should output binary data in the terminal).
 - **Check socket permissions**:
-  Ensure `/tmp/pinstral.sock` is writeable by the `shairport-sync` user. The daemon automatically runs `chmod 0777` on the socket file at startup.
+  Ensure `/tmp/pinstrel.sock` is writeable by the `shairport-sync` user. The daemon automatically runs `chmod 0777` on the socket file at startup.
