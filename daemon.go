@@ -17,7 +17,39 @@ import (
 	"gopkg.in/hraban/opus.v2"
 )
 
-// manages the Discord session, Unix socket server, and audio stream.
+const (
+	// sampleRate is the PCM sample rate Discord voice expects. shairport-sync
+	// is configured (configs/shairport-sync.conf.template) to resample
+	// AirPlay's 44.1kHz up to this so pinstrel never resamples.
+	sampleRate = 48000
+	// numChannels is the channel count (stereo) for both PCM input and the
+	// Opus encoder output.
+	numChannels = 2
+	// stopPollInterval is how often the stopCh ticker goroutine polls
+	// d.isStreaming. 100ms gives imperceptible stop latency with negligible
+	// lock contention.
+	stopPollInterval = 100 * time.Millisecond
+	// maxOpusPacketSize is the output buffer for a single Opus frame. The
+	// RFC 7587 max is 1275 bytes; 1024 covers our 128kbps frames with margin.
+	maxOpusPacketSize = 1024
+
+	// PCM frame layout for a 20ms Opus frame at 48kHz stereo S16LE:
+	//   48000 Hz * 0.02s = 960 samples/channel
+	//   960 * 2 channels = 1920 total samples
+	//   1920 * 2 bytes/sample = 3840 bytes
+	frameSamples  = sampleRate / 1000 * 20 // 960 samples per channel per 20ms frame
+	pcmFrameSize  = frameSamples * numChannels
+	pcmFrameBytes = pcmFrameSize * 2 // 16-bit samples
+
+	// guildMute and guildDeaf are the voice-state flags pinstrel requests on
+	// join: muted=false (we send audio), deafened=true (play-only bot — we
+	// never receive audio). The deaf=true UI badge is expected and does not
+	// affect sending.
+	guildMute = false
+	guildDeaf = true
+)
+
+// Daemon manages the Discord session, Unix socket IPC server, and audio stream.
 type Daemon struct {
 	config      *Config
 	dg          *discordgo.Session
@@ -33,7 +65,7 @@ type Daemon struct {
 	joining bool
 }
 
-// initializes a new Daemon, resolving the GuildID from the ChannelID.
+// NewDaemon initializes a new Daemon, resolving the GuildID from the ChannelID.
 func NewDaemon(cfg *Config) (*Daemon, error) {
 	dg, err := discordgo.New("Bot " + cfg.DiscordToken)
 	if err != nil {
@@ -56,7 +88,7 @@ func NewDaemon(cfg *Config) (*Daemon, error) {
 	}, nil
 }
 
-// opens the Discord session and listens for IPC commands on the Unix socket.
+// Start opens the Discord session and listens for IPC commands on the Unix socket.
 func (d *Daemon) Start() error {
 	if err := d.dg.Open(); err != nil {
 		return fmt.Errorf("failed to open Discord session: %w", err)
@@ -114,42 +146,58 @@ func (d *Daemon) Start() error {
 	}
 }
 
-func (d *Daemon) handleIPCStart(conn net.Conn) (int, error) {
+// handleIPCStart processes a "start" IPC command: kicks off streaming and
+// writes the IPC response ("OK" or "ERR: ...") to the client.
+func (d *Daemon) handleIPCStart(conn net.Conn) {
 	if err := d.startStreaming(); err != nil {
 		log.Printf("Error starting stream: %v", err)
-		return fmt.Fprintf(conn, "ERR: %v\n", err)
-	} else {
-		return conn.Write([]byte("OK\n"))
+		d.writeIPCResponse(conn, fmt.Sprintf("ERR: %v", err))
+		return
 	}
+	d.writeIPCResponse(conn, "OK")
 }
 
-func (d *Daemon) handleIPCStop(conn net.Conn) (int, error) {
+// handleIPCStop processes a "stop" IPC command: tears down streaming and
+// writes the IPC response ("OK" or "ERR: ...") to the client.
+func (d *Daemon) handleIPCStop(conn net.Conn) {
 	if err := d.stopStreaming(); err != nil {
 		log.Printf("Error stopping stream: %v", err)
-		return fmt.Fprintf(conn, "ERR: %v\n", err)
-	} else {
-		return conn.Write([]byte("OK\n"))
+		d.writeIPCResponse(conn, fmt.Sprintf("ERR: %v", err))
+		return
+	}
+	d.writeIPCResponse(conn, "OK")
+}
+
+// writeIPCResponse sends a single line response to the IPC client, logging
+// any write failure. The IPC client (shairport-sync hook) ignores the body
+// but expects a line so its blocking read completes.
+func (d *Daemon) writeIPCResponse(conn net.Conn, msg string) {
+	if _, err := conn.Write([]byte(msg + "\n")); err != nil {
+		log.Printf("Failed to write IPC response: %v", err)
 	}
 }
 
+// handleIPC reads a single IPC command from the Unix socket connection and
+// dispatches it. Unknown commands get an error response.
 func (d *Daemon) handleIPC(conn net.Conn) {
 	defer conn.Close()
 	scanner := bufio.NewScanner(conn)
-	if scanner.Scan() {
-		cmd := scanner.Text()
-		log.Printf("Received IPC command: %s", cmd)
-		switch cmd {
-		case "start":
-			_, _ = d.handleIPCStart(conn)
-		case "stop":
-			_, _ = d.handleIPCStop(conn)
-		default:
-			_, _ = conn.Write([]byte("ERR: Unknown command\n"))
-		}
+	if !scanner.Scan() {
+		return
+	}
+	cmd := scanner.Text()
+	log.Printf("Received IPC command: %s", cmd)
+	switch cmd {
+	case "start":
+		d.handleIPCStart(conn)
+	case "stop":
+		d.handleIPCStop(conn)
+	default:
+		d.writeIPCResponse(conn, "ERR: Unknown command")
 	}
 }
 
-// kicks off a Discord voice join in the background and returns
+// startStreaming kicks off a Discord voice join in the background and returns
 // OK to the IPC client (shairport) immediately, without waiting for the voice
 // WS/UDP handshake. This replaces the previous synchronous ChannelVoiceJoin
 // call, which blocked shairport's `run_this_before_play_begins` hook for up to
@@ -202,7 +250,7 @@ func (d *Daemon) startStreaming() error {
 	return nil
 }
 
-// closes the named pipe and disconnects the Discord voice bot.
+// stopStreaming closes the named pipe and disconnects the Discord voice bot.
 func (d *Daemon) stopStreaming() error {
 	d.activeMu.Lock()
 	defer d.activeMu.Unlock()
@@ -238,7 +286,28 @@ func (d *Daemon) stopStreaming() error {
 	return nil
 }
 
-// performs the full lifecycle of a streaming session on a single
+// cleanupStreamState tears down the streaming session state: clears the
+// joining/streaming flags, disconnects the voice connection, and closes the
+// active pipe. Idempotent — safe to call from multiple cleanup paths (early
+// exit, deadline, stop, and the main streamLoop defer). The caller must not
+// hold d.activeMu.
+func (d *Daemon) cleanupStreamState() {
+	d.activeMu.Lock()
+	defer d.activeMu.Unlock()
+	d.isStreaming = false
+	d.joining = false
+	if d.vc != nil {
+		_ = d.vc.Speaking(false)
+		_ = d.vc.Disconnect()
+		d.vc = nil
+	}
+	if d.activePipe != nil {
+		d.activePipe.Close()
+		d.activePipe = nil
+	}
+}
+
+// streamLoop performs the full lifecycle of a streaming session on a single
 // goroutine: it runs the blocking ChannelVoiceJoin in a sub-goroutine, opens
 // the audio FIFO for reading in another, and once both have succeeded enters
 // the Opus encode/send loop. It owns d.activePipe and is the single place
@@ -250,13 +319,10 @@ func (d *Daemon) streamLoop() {
 
 	// Initialize Opus encoder (48kHz, Stereo) up-front so it's ready the moment
 	// voice flips Ready. Encoder construction is cheap and doesn't touch Discord.
-	enc, err := opus.NewEncoder(48000, 2, opus.AppAudio)
+	enc, err := opus.NewEncoder(sampleRate, numChannels, opus.AppAudio)
 	if err != nil {
 		log.Printf("Failed to create Opus encoder: %v", err)
-		d.activeMu.Lock()
-		d.isStreaming = false
-		d.joining = false
-		d.activeMu.Unlock()
+		d.cleanupStreamState()
 		return
 	}
 	if err := enc.SetBitrate(d.config.Bitrate); err != nil {
@@ -272,25 +338,21 @@ func (d *Daemon) streamLoop() {
 	// cleanly (sends the nil-channel OP4) so no ghost lingers.
 	readyTimeout := time.Duration(d.config.VoiceReadyTimeout) * time.Second
 	if readyTimeout <= 0 {
-		readyTimeout = 30 * time.Second // guard against misconfigured 0/negative
+		readyTimeout = time.Duration(defaultVoiceReadyTimeout) * time.Second // guard against misconfigured 0/negative
 	}
 	deadline := time.Now().Add(readyTimeout)
 	remaining := time.Until(deadline)
 
 	// stopCh unifies the stopStreaming path with the deadline-based waits
-	// below. A tiny ticker goroutine polls d.isStreaming every 100ms and
-	// signals stopCh when it flips false. We close stopCh only when streamLoop
-	// itself is exiting so the ticker goroutine can return; on the happy path
-	// the ticker goroutine exits via the stopCh close in the deferred cleanup.
-	// stopCh is buffered (cap 1) so the ticker goroutine's send can never be
-	// lost: streamLoop may be parked in another select arm when the stop
-	// arrives, and an unbuffered non-blocking send would drop the signal and
-	// leave streamLoop blocked until the deadline. A blocking send on a cap-1
-	// channel always queues exactly one signal; the ticker goroutine exits
-	// immediately after the (single) delivery.
+	// below. A tiny ticker goroutine polls d.isStreaming every stopPollInterval
+	// and signals stopCh when it flips false. stopCh is buffered (cap 1) so the
+	// ticker's blocking send can never be lost: streamLoop may be parked in
+	// another select arm when the stop arrives, and an unbuffered non-blocking
+	// send would drop the signal and leave streamLoop blocked until the
+	// deadline. We close stopCh when streamLoop exits so the ticker can return.
 	stopCh := make(chan struct{}, 1)
 	go func() {
-		t := time.NewTicker(100 * time.Millisecond)
+		t := time.NewTicker(stopPollInterval)
 		defer t.Stop()
 		for {
 			select {
@@ -320,7 +382,7 @@ func (d *Daemon) streamLoop() {
 	log.Printf("Joining Discord voice channel %s (async; deadline %s)", d.config.ChannelID, readyTimeout)
 	joinStart := time.Now()
 	go func() {
-		vc, err := d.dg.ChannelVoiceJoin(d.guildID, d.config.ChannelID, false, true)
+		vc, err := d.dg.ChannelVoiceJoin(d.guildID, d.config.ChannelID, guildMute, guildDeaf)
 		voiceCh <- voiceResult{vc, err}
 	}()
 
@@ -354,10 +416,7 @@ func (d *Daemon) streamLoop() {
 			if vr.vc != nil {
 				_ = vr.vc.Disconnect()
 			}
-			d.activeMu.Lock()
-			d.isStreaming = false
-			d.joining = false
-			d.activeMu.Unlock()
+			d.cleanupStreamState()
 			// Drain the FIFO goroutine: it's blocked on shairport opening the
 			// writer side. We can't cancel a blocking os.OpenFile on a FIFO
 			// from here, so it will leak until shairport connects or the
@@ -374,10 +433,7 @@ func (d *Daemon) streamLoop() {
 			"ChannelVoiceJoin sub-goroutine will time out internally (~10s) and "+
 			"clean up its own VoiceConnection. No ghost remains. See README "+
 			"troubleshooting.", readyTimeout)
-		d.activeMu.Lock()
-		d.isStreaming = false
-		d.joining = false
-		d.activeMu.Unlock()
+		d.cleanupStreamState()
 		// voiceCh is buffered so the leaked join goroutine won't block when it
 		// eventually completes (we're no longer reading). Same for fifoCh.
 		return
@@ -387,10 +443,7 @@ func (d *Daemon) streamLoop() {
 		// (~10s) and Close its own VoiceConnection; we don't need to do
 		// anything further here.
 		log.Println("Stop received while waiting for voice join; abandoning.")
-		d.activeMu.Lock()
-		d.isStreaming = false
-		d.joining = false
-		d.activeMu.Unlock()
+		d.cleanupStreamState()
 		return
 	}
 
@@ -403,40 +456,19 @@ func (d *Daemon) streamLoop() {
 	case fr := <-fifoCh:
 		if fr.err != nil {
 			log.Printf("Failed to open named pipe: %v", fr.err)
-			_ = vc.Speaking(false)
-			_ = vc.Disconnect()
-			d.activeMu.Lock()
-			d.isStreaming = false
-			if d.vc != nil {
-				d.vc = nil
-			}
-			d.activeMu.Unlock()
+			d.cleanupStreamState()
 			return
 		}
 		pipe = fr.pipe
 	case <-time.After(remaining):
 		log.Printf("Timed out waiting for shairport to open the audio FIFO writer "+
 			"within %s — disconnecting.", readyTimeout)
-		_ = vc.Speaking(false)
-		_ = vc.Disconnect()
-		d.activeMu.Lock()
-		d.isStreaming = false
-		if d.vc != nil {
-			d.vc = nil
-		}
-		d.activeMu.Unlock()
+		d.cleanupStreamState()
 		return
 	case <-stopCh:
 		// stopStreaming was called while we were waiting for the FIFO writer.
 		log.Println("Stop received while waiting for FIFO writer; disconnecting.")
-		_ = vc.Speaking(false)
-		_ = vc.Disconnect()
-		d.activeMu.Lock()
-		d.isStreaming = false
-		if d.vc != nil {
-			d.vc = nil
-		}
-		d.activeMu.Unlock()
+		d.cleanupStreamState()
 		return
 	}
 
@@ -446,47 +478,17 @@ func (d *Daemon) streamLoop() {
 
 	defer func() {
 		log.Println("Audio streaming loop exited")
-		d.activeMu.Lock()
-		// If stopStreaming already ran, it set isStreaming=false and d.vc=nil
-		// (and closed d.activePipe). Only clean up if we still own the state.
-		if d.isStreaming {
-			d.isStreaming = false
-			if d.activePipe != nil {
-				d.activePipe.Close()
-				d.activePipe = nil
-			}
-			if d.vc != nil {
-				_ = d.vc.Speaking(false)
-				_ = d.vc.Disconnect()
-				d.vc = nil
-			}
-		} else if d.activePipe != nil {
-			// Defensive: stopStreaming clears d.activePipe, but if we got here
-			// via the read-loop EOF with a non-nil pipe the FD must close.
-			d.activePipe.Close()
-			d.activePipe = nil
-		}
-		d.activeMu.Unlock()
+		d.cleanupStreamState()
 	}()
 
 	_ = vc.Speaking(true)
-	defer func() { _ = vc.Speaking(false) }()
 
-	// Calculations for 20ms frame:
-	// 48000 Hz * 0.02s = 960 samples per channel
-	// 960 samples * 2 channels = 1920 total samples
-	// 1920 samples * 2 bytes/sample = 3840 bytes PCM frame
-	const frameSamples = 960
-	const channels = 2
-	const pcmSize = frameSamples * channels
-	const byteSize = pcmSize * 2
-
-	byteBuf := make([]byte, byteSize)
-	pcmBuf := make([]int16, pcmSize)
-	opusBuf := make([]byte, 1024)
+	byteBuf := make([]byte, pcmFrameBytes)
+	pcmBuf := make([]int16, pcmFrameSize)
+	opusBuf := make([]byte, maxOpusPacketSize)
 
 	for {
-		// Read 3840 bytes. This blocks until the pipe has sufficient data.
+		// Read a full PCM frame. This blocks until the pipe has sufficient data.
 		_, err := io.ReadFull(pipe, byteBuf)
 		if err != nil {
 			if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) || errors.Is(err, os.ErrClosed) {
@@ -497,19 +499,17 @@ func (d *Daemon) streamLoop() {
 			return
 		}
 
-		// Convert Little-Endian PCM byte buffer to int16 samples
-		for i := range pcmSize {
-			pcmBuf[i] = int16(binary.LittleEndian.Uint16(byteBuf[i*2 : i*2+2]))
-		}
+		// Convert little-endian PCM byte buffer to int16 samples.
+		decodePCMFrame(byteBuf, pcmBuf)
 
-		// Encode PCM samples to Opus packet
+		// Encode PCM samples to an Opus packet.
 		n, err := enc.Encode(pcmBuf, opusBuf)
 		if err != nil {
 			log.Printf("Opus encoding error: %v", err)
 			return
 		}
 
-		// Clone the slice since the channel send is async and we reuse opusBuf
+		// Clone the slice since the channel send is async and we reuse opusBuf.
 		packet := make([]byte, n)
 		copy(packet, opusBuf[:n])
 
@@ -518,5 +518,14 @@ func (d *Daemon) streamLoop() {
 		default:
 			log.Println("Warning: OpusSend channel full, dropping packet")
 		}
+	}
+}
+
+// decodePCMFrame converts a little-endian S16LE byte buffer into int16 samples.
+// It is the pure (side-effect-free) inverse of the wire format shairport-sync
+// emits on its pipe backend. byteBuf must be exactly 2*len(pcmBuf) bytes.
+func decodePCMFrame(byteBuf []byte, pcmBuf []int16) {
+	for i := range pcmBuf {
+		pcmBuf[i] = int16(binary.LittleEndian.Uint16(byteBuf[i*2 : i*2+2]))
 	}
 }

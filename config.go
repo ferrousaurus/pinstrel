@@ -7,6 +7,14 @@ import (
 	"github.com/pelletier/go-toml/v2"
 )
 
+const (
+	// defaultVoiceReadyTimeout is the deadline (in seconds) for the Discord
+	// voice WS/UDP handshake before pinstrel abandons the join. Referenced by
+	// both DefaultConfig (the TOML default) and the streamLoop guard (which
+	// catches a misconfigured 0/negative value) so the two can't drift.
+	defaultVoiceReadyTimeout = 30
+)
+
 // Config holds the application configuration.
 type Config struct {
 	DiscordToken      string `toml:"DISCORD_TOKEN"`
@@ -24,7 +32,7 @@ func DefaultConfig() *Config {
 		Bitrate:           128000,
 		PipePath:          "/tmp/shairport-sync-audio",
 		SocketPath:        "/tmp/pinstrel.sock",
-		VoiceReadyTimeout: 30,
+		VoiceReadyTimeout: defaultVoiceReadyTimeout,
 	}
 }
 

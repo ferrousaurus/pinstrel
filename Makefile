@@ -14,7 +14,7 @@ LDFLAGS    := -s -w
 GOFLAGS    := -trimpath
 BINARY     := pinstrel
 
-.PHONY: all clean pi-arm64 pi-arm install-native test
+.PHONY: all clean pi-arm64 pi-arm build-native test
 
 all: $(BINARY)
 
@@ -22,7 +22,7 @@ $(BINARY):
 	go build $(GOFLAGS) -ldflags '$(LDFLAGS)' -o ./dist/$(BINARY) .
 
 # Build on the Pi itself (same as `make all` — alias for clarity).
-install-native: $(BINARY)
+build-native: $(BINARY)
 
 # Cross-compile from macOS / Linux for an arm64 Raspberry Pi (Pi 3/4/5/Zero 2 W
 # in 64-bit mode). Requires the aarch64 cross toolchain for CGO (libopus).
