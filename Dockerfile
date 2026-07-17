@@ -7,6 +7,7 @@ FROM golang:bookworm AS builder
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     libopus-dev \
+    libopusfile-dev \
     pkg-config \
     && rm -rf /var/lib/apt/lists/*
 
@@ -29,12 +30,13 @@ FROM debian:bookworm-slim
 
 # Install runtime dependencies:
 # - shairport-sync for AirPlay capture
-# - libopus0 for Opus audio encoding
+# - libopus0 and libopusfile0 for Opus audio encoding
 # - avahi-daemon for AirPlay mDNS discovery
 # - ca-certificates for secure Discord API communication
 RUN apt-get update && apt-get install -y --no-install-recommends \
     shairport-sync \
     libopus0 \
+    libopusfile0 \
     avahi-daemon \
     ca-certificates \
     && rm -rf /var/lib/apt/lists/*
