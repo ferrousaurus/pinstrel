@@ -1,0 +1,30 @@
+[Unit]
+Description=pinstrel AirPlay-to-Discord streaming daemon
+Documentation=https://github.com/ferrousaurus/pinstral
+After=network-online.target shairport-sync.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+# The daemon resolves the Discord guild from the channel ID and then keeps a persistent
+# Discord gateway connection plus a Unix domain socket for IPC with shairport-sync.
+# /etc/pinstrel.toml is required; the daemon also chmods the socket/pipe to be
+# world-writable so the shairport-sync user can talk to it without sharing a group.
+ExecStart=/usr/local/bin/pinstrel daemon --config /etc/pinstrel.toml
+Restart=on-failure
+RestartSec=5
+
+# Hardening that is safe given pinstrel's needs:
+#   - network: required for Discord gateway
+#   - /tmp:    used for the IPC socket and audio FIFO
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/tmp
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+
+[Install]
+WantedBy=multi-user.target
