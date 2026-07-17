@@ -1,0 +1,103 @@
+---
+name: Release (linux/arm64)
+
+# Build and release the `pinstrel` binary for linux/arm64.
+#
+# The application uses CGO (libopus via hraban/opus.v2), so we run on
+# GitHub's native ARM64 runner (`ubuntu-24.04-arm`) instead of
+# cross-compiling from amd64. This avoids needing an arm64 C
+# cross-compiler toolchain and lets `go build` use the system
+# `libopus-dev` directly.
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag (e.g. v0.1.0). Leave blank to auto-generate."
+        required: false
+        default: ""
+      prerelease:
+        description: "Mark as a pre-release"
+        type: boolean
+        required: false
+        default: false
+      name:
+        description: "Release title"
+        required: false
+        default: ""
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-release:
+    name: Build & release (linux/arm64)
+    runs-on: ubuntu-24.04-arm
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install native build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential \
+            pkg-config \
+            libopus-dev
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Verify native target
+        # Sanity check that we are genuinely on arm64 hardware.
+        run: |
+          echo "uname -m: $(uname -m)"
+          test "$(uname -m)" = "aarch64"
+
+      - name: Build
+        env:
+          CGO_ENABLED: "1"
+          GOOS: linux
+          GOARCH: arm64
+        run: |
+          go build -trimpath -ldflags "-s -w" -o pinstrel .
+        shell: bash
+
+      - name: Compress artifact
+        run: tar -czf pinstrel-linux-arm64.tar.gz pinstrel
+
+      - name: Generate checksum
+        run: sha256sum pinstrel-linux-arm64.tar.gz > pinstrel-linux-arm64.tar.gz.sha256
+
+      - name: Resolve release tag
+        id: rel
+        shell: bash
+        run: |
+          if [ -n "${{ github.event.inputs.tag }}" ]; then
+            tag="${{ github.event.inputs.tag }}"
+          else
+            tag="v$(date -u +%Y%m%d)-${{ github.run_number }}"
+          fi
+          echo "tag=${tag}" >> "$GITHUB_OUTPUT"
+          name="${{ github.event.inputs.name }}"
+          if [ -z "$name" ]; then name="pinstrel ${tag} (linux/arm64)"; fi
+          echo "name=${name}" >> "$GITHUB_OUTPUT"
+
+      - name: Create release
+        id: create_release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.rel.outputs.tag }}
+          name: ${{ steps.rel.outputs.name }}
+          prerelease: ${{ github.event.inputs.prerelease == 'true' }}
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+          files: |
+            pinstrel-linux-arm64.tar.gz
+            pinstrel-linux-arm64.tar.gz.sha256

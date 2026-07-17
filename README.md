@@ -107,63 +107,6 @@ sudo systemctl start pinstrel
 
 ---
 
-## 4. Running with Docker
-
-Alternatively, you can run both `pinstrel` and `shairport-sync` in a single Docker container. This is the recommended approach for clean installations.
-
-### Step 4.1: Build the Image
-
-Build the image locally:
-
-```bash
-docker build -t pinstrel:latest .
-```
-
-### Step 4.2: Run with Docker Compose
-
-Using `docker-compose.yml` is the easiest way to configure and run the container:
-
-```yaml
-version: "3.8"
-
-services:
-  pinstrel:
-    image: pinstrel:latest
-    container_name: pinstrel
-    network_mode: host
-    restart: always
-    environment:
-      - DISCORD_TOKEN=YOUR_DISCORD_BOT_TOKEN
-      - DISCORD_CHANNEL_ID=YOUR_DISCORD_VOICE_CHANNEL_ID
-      - BITRATE=128000
-```
-
-Run the service:
-
-```bash
-docker compose up -d
-```
-
-### Step 4.3: Run with Docker CLI
-
-If you prefer standard Docker commands, run:
-
-```bash
-docker run -d \
-  --name pinstrel \
-  --net=host \
-  --restart=always \
-  -e DISCORD_TOKEN="YOUR_DISCORD_BOT_TOKEN" \
-  -e DISCORD_CHANNEL_ID="YOUR_DISCORD_VOICE_CHANNEL_ID" \
-  -e BITRATE=128000 \
-  pinstrel:latest
-```
-
-> [!IMPORTANT]
-> **Network Mode Host**: You **must** use `--net=host` (`network_mode: host` in Docker Compose). This allows `avahi-daemon` inside the container to broadcast mDNS discovery packets to your local network, enabling your Apple devices to find the "pinstrel AirPlay" speaker.
-
----
-
 ## How It Works Under the Hood
 
 1. When you select **pinstrel AirPlay** from your iPhone/Mac audio output menu:
@@ -191,3 +134,5 @@ docker run -d \
   If the daemon is running but there is no sound, check if audio is actually being written to the pipe by running `cat /tmp/shairport-sync-audio` while AirPlay is active (it should output binary data in the terminal).
 - **Check socket permissions**:
   Ensure `/tmp/pinstrel.sock` is writeable by the `shairport-sync` user. The daemon automatically runs `chmod 0777` on the socket file at startup.
+- **No AirPlay entry appears, but the bot joined Discord**:
+  This means `shairport-sync`/`avahi-daemon` failed to advertise via mDNS while the Discord daemon (a separate TCP path to Discord's gateway) succeeded. Check `docker logs` for `couldn't create avahi client: Daemon not running!`, `Could not establish mDNS advertisement!`, or the entrypoint's `ERROR: UDP 5353 is already bound`. The usual cause is the host's `avahi-daemon` still holding UDP 5353 (often because `avahi-daemon.socket` is still active-listening after only `systemctl stop avahi-daemon` was run). See the [CAUTION](#4-running-with-docker) in Section 4 — apply `systemctl stop/disable/mask avahi-daemon avahi-daemon.socket` on the host, verify `sudo ss -lunp | grep :5353` prints nothing, then restart the container. Note: the container now refuses to start at all if 5353 is taken, so an explicit pre-flight error in `docker logs` confirms this is your problem.
