@@ -58,23 +58,32 @@ func (o *fifoOpener) Open() (io.ReadCloser, error) {
 type Daemon struct {
 	config     *config.Config
 	voice      voice.Session
-	guildID    string
-	pipeOpener PipeOpener
+	// guildIDs is 1:1 with config.ChannelIDs, resolved once at New() time so
+	// streamLoop can fan out the Joins without any REST calls during playback.
+	// Channels may live in different guilds — we deliberately do not dedupe.
+	guildIDs    []string
+	pipeOpener  PipeOpener
 
 	activeMu    sync.Mutex
 	isStreaming bool
 	// joining is true between the moment we send OP4 (inside JoinChannel) and
-	// the moment the voice WS/UDP handshake either completes or times out. It
+	// the moment all voice WS/UDP handshakes either complete or time out. It
 	// prevents concurrent start commands from issuing redundant
-	// VOICE_STATE_UPDATEs against the same guild.
+	// VOICE_STATE_UPDATEs against the same guild. With N configured channels,
+	// joining covers the whole fan-out phase, not any single join.
 	joining    bool
-	vc         voice.Connection
-	activePipe io.ReadCloser
+	// vcs holds the connections that successfully joined during the current
+	// streamLoop. streamLoop fans every Opus packet out to all of them. Order
+	// matches the order of successful joins, NOT d.config.ChannelIDs — failed
+	// joins are skipped. Ownership is exclusive to streamLoop until cleanup.
+	vcs         []voice.Connection
+	activePipe  io.ReadCloser
 }
 
 // New creates a Daemon from the given config and Discord session, resolving
-// the GuildID from the configured ChannelID. The DiscordToken and ChannelID
-// must be non-empty.
+// the GuildID for every configured ChannelID. The DiscordToken must be
+// non-empty and DISCORD_CHANNEL_IDS must list at least one channel ID. Channels
+// may live in different guilds — each is resolved independently.
 func New(cfg *config.Config, v voice.Session) (*Daemon, error) {
 	return newDaemon(cfg, v, &fifoOpener{path: cfg.PipePath})
 }
@@ -89,17 +98,26 @@ func newDaemon(cfg *config.Config, v voice.Session, opener PipeOpener) (*Daemon,
 	if cfg.DiscordToken == "" {
 		return nil, errors.New("DISCORD_TOKEN is required in config")
 	}
-	if cfg.ChannelID == "" {
-		return nil, errors.New("DISCORD_CHANNEL_ID is required in config")
+	if len(cfg.ChannelIDs) == 0 {
+		return nil, errors.New("DISCORD_CHANNEL_IDS must list at least one channel")
 	}
-	guildID, err := v.ResolveGuild(cfg.ChannelID)
-	if err != nil {
-		return nil, err
+	// Resolve each channel's guild up-front so streamLoop can fan out joins
+	// without any REST calls during playback. A bad channel ID is a hard
+	// error — pinstrel would otherwise discover it only on the first AirPlay
+	// attempt, which is a poor time to fail. Config-level normalization
+	// (whitespace trim, empty-drop) is already done in LoadConfig.
+	guildIDs := make([]string, len(cfg.ChannelIDs))
+	for i, chID := range cfg.ChannelIDs {
+		g, err := v.ResolveGuild(chID)
+		if err != nil {
+			return nil, fmt.Errorf("resolve channel %q: %w", chID, err)
+		}
+		guildIDs[i] = g
 	}
 	return &Daemon{
 		config:     cfg,
 		voice:      v,
-		guildID:    guildID,
+		guildIDs:   guildIDs,
 		pipeOpener: opener,
 	}, nil
 }
@@ -115,7 +133,7 @@ func (d *Daemon) Run() error {
 
 	// The IPC server holds the Daemon as its CommandHandler; HandleStart and
 	// HandleStop are the entry points shairport-sync's hooks invoke.
-	log.Printf("Starting pinstrel daemon (channel %s, guild %s)", d.config.ChannelID, d.guildID)
+	log.Printf("Starting pinstrel daemon (channels %v, guilds %v)", d.config.ChannelIDs, d.guildIDs)
 	srv := ipc.NewServer(d.config.SocketPath, d)
 	return srv.ListenAndServe()
 }
@@ -164,8 +182,8 @@ func (d *Daemon) startStreaming() error {
 	d.joining = true
 	d.isStreaming = true
 
-	// streamLoop owns the blocking JoinChannel + pipe open + Opus send loop
-	// and all cleanup of d.vc/d.activePipe. It is the single place we
+	// streamLoop owns the blocking JoinChannel fan-out + pipe open + Opus send
+	// loop and all cleanup of d.vcs/d.activePipe. It is the single place we
 	// transition out of the joining/streaming state on EOF/error/timeout.
 	go d.streamLoop()
 
@@ -195,32 +213,37 @@ func (d *Daemon) stopStreaming() error {
 		d.activePipe = nil
 	}
 
-	if d.vc != nil {
+	if len(d.vcs) > 0 {
 		// Disconnect (not Close) sends the OP4-with-nil-channel so Discord
 		// removes us from the channel UI — Close alone would tear down the
-		// voice WS/UDP but leave a "ghost" presence in the channel.
-		_ = d.vc.Speaking(false)
-		_ = d.vc.Disconnect()
-		d.vc = nil
+		// voice WS/UDP but leave a "ghost" presence in the channel. One
+		// nil-channel OP4 per connection; each connection is independent.
+		for _, c := range d.vcs {
+			_ = c.Speaking(false)
+			_ = c.Disconnect()
+		}
+		d.vcs = nil
 	}
 
 	return nil
 }
 
 // cleanupStreamState tears down the streaming session state: clears the
-// joining/streaming flags, disconnects the voice connection, and closes the
-// active pipe. Idempotent — safe to call from multiple cleanup paths (early
-// exit, deadline, stop, and the main streamLoop defer). The caller must not
-// hold d.activeMu.
+// joining/streaming flags, disconnects every joined voice connection, and
+// closes the active pipe. Idempotent — safe to call from multiple cleanup
+// paths (early exit, deadline, stop, and the main streamLoop defer). The
+// caller must not hold d.activeMu.
 func (d *Daemon) cleanupStreamState() {
 	d.activeMu.Lock()
 	defer d.activeMu.Unlock()
 	d.isStreaming = false
 	d.joining = false
-	if d.vc != nil {
-		_ = d.vc.Speaking(false)
-		_ = d.vc.Disconnect()
-		d.vc = nil
+	if len(d.vcs) > 0 {
+		for _, c := range d.vcs {
+			_ = c.Speaking(false)
+			_ = c.Disconnect()
+		}
+		d.vcs = nil
 	}
 	if d.activePipe != nil {
 		d.activePipe.Close()
@@ -229,12 +252,13 @@ func (d *Daemon) cleanupStreamState() {
 }
 
 // streamLoop performs the full lifecycle of a streaming session on a single
-// goroutine: it runs the blocking JoinChannel in a sub-goroutine, opens the
-// audio pipe for reading in another, and once both succeed enters the Opus
-// encode/send loop. It owns d.activePipe and is the single place that
-// transitions out of the joining/streaming state on failure. IPC stop is
-// handled separately in stopStreaming and works by closing the pipe (EOF) and
-// disconnecting the vc.
+// goroutine: it fans out one blocking JoinChannel sub-goroutine per
+// configured channel, opens the audio pipe for reading in another, and once
+// at least one join succeeds and the pipe is open enters the Opus encode/send
+// loop which broadcasts to every joined connection. It owns d.activePipe and
+// d.vcs and is the single place that transitions out of the
+// joining/streaming state on failure. IPC stop is handled separately in
+// stopStreaming and works by closing the pipe (EOF) and disconnecting the vcs.
 func (d *Daemon) streamLoop() {
 	log.Println("Audio streaming loop started")
 
@@ -290,25 +314,40 @@ func (d *Daemon) streamLoop() {
 	}()
 	defer close(stopCh)
 
-	// Kick off the blocking voice join in a sub-goroutine so we can race it
-	// against our outer deadline and against stopStreaming. The result
-	// channel is buffered so the sub-goroutine never leaks if we leave early.
+	// Fan out one JoinChannel sub-goroutine per configured channel so all N
+	// handshakes run concurrently. Every sub-goroutine races against the
+	// same shared wall-clock deadline (VOICE_READY_TIMEOUT) — concurrent
+	// joins means concurrent budget, not VOICE_READY_TIMEOUT/N per channel.
+	// The results channel is buffered to len(ChannelIDs) so a
+	// sub-goroutine whose result we never read (because we left via the
+	// deadline or stopCh arm) still completes its send and exits without
+	// leaking. It will already have created a *discordgo.VoiceConnection; we
+	// leave that for discordgo's internal ~10s waitUntilConnected timeout to
+	// disconnect (same tradeoff as the single-channel code, scaled by N).
 	type voiceResult struct {
-		vc  voice.Connection
-		err error
+		idx     int
+		channel string
+		vc      voice.Connection
+		err     error
 	}
-	voiceCh := make(chan voiceResult, 1)
-	log.Printf("Joining Discord voice channel %s (async; deadline %s)", d.config.ChannelID, readyTimeout)
+	channels := d.config.ChannelIDs
+	voiceCh := make(chan voiceResult, len(channels))
 	joinStart := time.Now()
-	go func() {
-		vc, err := d.voice.JoinChannel(d.guildID, d.config.ChannelID, guildMute, guildDeaf)
-		voiceCh <- voiceResult{vc, err}
-	}()
+	for i, chID := range channels {
+		i, chID := i, chID
+		log.Printf("Joining Discord voice channel %s (async; deadline %s)", chID, readyTimeout)
+		go func() {
+			vc, err := d.voice.JoinChannel(d.guildIDs[i], chID, guildMute, guildDeaf)
+			voiceCh <- voiceResult{i, chID, vc, err}
+		}()
+	}
 
 	// Open the audio pipe for reading in parallel. The FIFO open blocks until
 	// a writer (shairport) connects; running it concurrently with the voice
-	// join means we don't serialize the two waits, and we can fail fast if
-	// either side exceeds the deadline.
+	// joins means we don't serialize the waits, and we can fail fast if
+	// either side exceeds the deadline. There is exactly one shared reader —
+	// every successfully-joined connection will be sent Opus packets read
+	// from this same pipe.
 	type fifoResult struct {
 		pipe io.ReadCloser
 		err  error
@@ -319,42 +358,71 @@ func (d *Daemon) streamLoop() {
 		fifoCh <- fifoResult{pipe, err}
 	}()
 
-	// Wait for the voice join result.
-	var vc voice.Connection
-	select {
-	case vr := <-voiceCh:
-		log.Printf("JoinChannel returned in %s (err=%v)", time.Since(joinStart), vr.err)
-		if vr.err != nil {
-			// JoinChannel already called voice.Close() internally on timeout,
-			// but Close does NOT send the gateway nil-channel OP4, so the bot
-			// stays visible. Call Disconnect to clear the ghost. vr.vc may be
-			// nil if the failure happened before voice registration.
-			if vr.vc != nil {
-				_ = vr.vc.Disconnect()
+	// Collect join results until either every join has reported, the shared
+	// deadline fires, or stop arrives. We deliberately do NOT bail on the
+	// first failure — partial-join semantics: skip the failed channel and
+	// keep collecting. The whole attempt only aborts if zero channels joined.
+	joined := make([]voice.Connection, 0, len(channels))
+	joinedIdx := make([]int, 0, len(channels))
+	pending := len(channels)
+	var deadlineCh <-chan time.Time
+	if remaining > 0 {
+		deadlineCh = time.After(remaining)
+	}
+collectJoins:
+	for pending > 0 {
+		select {
+		case vr := <-voiceCh:
+			pending--
+			log.Printf("JoinChannel for %s returned in %s (err=%v)", vr.channel, time.Since(joinStart), vr.err)
+			if vr.err != nil {
+				// JoinChannel already called voice.Close() internally on
+				// timeout, but Close does NOT send the gateway nil-channel
+				// OP4, so the bot stays visible. Call Disconnect to clear
+				// the ghost. vr.vc may be nil if the failure happened
+				// before voice registration.
+				if vr.vc != nil {
+					_ = vr.vc.Disconnect()
+				}
+				log.Printf("Channel %s join failed: %v — skipping", vr.channel, vr.err)
+				continue
+			}
+			joined = append(joined, vr.vc)
+			joinedIdx = append(joinedIdx, vr.idx)
+		case <-deadlineCh:
+			log.Printf("Voice joins exceeded %s deadline with %d/%d still pending — "+
+				"abandoning the pending ones and streaming to the %d already joined. "+
+				"In-flight JoinChannel sub-goroutines will time out internally "+
+				"(~10s each) and clean up their own voice connections. See README.",
+				readyTimeout, pending, len(channels), len(joined))
+			break collectJoins
+		case <-stopCh:
+			log.Println("Stop received while waiting for voice joins; abandoning.")
+			// Drain any connections we did collect before tearing down so
+			// they don't leak.
+			for _, c := range joined {
+				_ = c.Disconnect()
 			}
 			d.cleanupStreamState()
-			// The FIFO goroutine is blocked on shairport opening the writer
-			// side. We can't cancel a blocking os.OpenFile on a FIFO from
-			// here, so it leaks until shairport connects or the process
-			// exits. Documented as an acceptable tradeoff in AGENTS.md.
 			return
 		}
-		vc = vr.vc
-		d.activeMu.Lock()
-		d.vc = vc
-		d.joining = false
-		d.activeMu.Unlock()
-	case <-time.After(remaining):
-		log.Printf("Voice join exceeded %s deadline — abandoning. The in-flight "+
-			"JoinChannel sub-goroutine will time out internally (~10s) and clean "+
-			"up its own voice connection. No ghost remains. See README.", readyTimeout)
+	}
+
+	if len(joined) == 0 {
+		log.Printf("All %d voice joins failed — aborting stream. No audio will be streamed.", len(channels))
 		d.cleanupStreamState()
-		return
-	case <-stopCh:
-		log.Println("Stop received while waiting for voice join; abandoning.")
-		d.cleanupStreamState()
+		// The FIFO goroutine is blocked on shairport opening the writer
+		// side. We can't cancel a blocking os.OpenFile on a FIFO from
+		// here, so it leaks until shairport connects or the process
+		// exits. Documented as an acceptable tradeoff in AGENTS.md.
 		return
 	}
+
+	log.Printf("Successfully joined %d/%d voice channels", len(joined), len(channels))
+	d.activeMu.Lock()
+	d.vcs = joined
+	d.joining = false
+	d.activeMu.Unlock()
 
 	// Voice joined. Now wait for the pipe reader side (shairport opening the
 	// writer). Use the same deadline; if playback never materializes we bail
@@ -389,7 +457,19 @@ func (d *Daemon) streamLoop() {
 		d.cleanupStreamState()
 	}()
 
-	_ = vc.Speaking(true)
+	// Tell Discord we're speaking on every joined connection. Failures here
+	// are non-fatal — the connection still ships Opus packets over UDP, just
+	// without the speaking indicator, so we log nothing and move on.
+	for _, c := range joined {
+		_ = c.Speaking(true)
+	}
+	// Snapshot the joined connections into locals for the encode/send loop.
+	// `joined` and `joinedIDs` are positionally parallel — index i in one
+	// corresponds to index i in the other. Capturing once (rather than
+	// re-reading d.vcs under the lock each 20ms frame) matches the original
+	// single-channel pattern, which had the same Disconnect-vs-send race
+	// and treated it as accepted.
+	joinedIDs := d.shortChannelIDs(joinedIdx)
 
 	byteBuf := make([]byte, audio.FrameBytes)
 	pcmBuf := make([]int16, audio.FrameSize)
@@ -415,14 +495,44 @@ func (d *Daemon) streamLoop() {
 			return
 		}
 
-		// Clone the slice since the channel send is async and we reuse opusBuf.
-		packet := make([]byte, n)
-		copy(packet, opusBuf[:n])
-
-		select {
-		case vc.OpusSend() <- packet:
-		default:
-			log.Println("Warning: OpusSend channel full, dropping packet")
+		// Fan out the encoded packet to every joined connection. We encode
+		// ONCE per frame (single Opus encoder, unchanged CPU cost on the Pi)
+		// and give each connection its own freshly-allocated copy of the
+		// packet bytes — never alias the shared opusBuf across the async
+		// channel sends. discordgo's per-connection UDP senders read from
+		// their OpusSend channel on independent goroutines and would race
+		// on opusBuf if we shared it. The old single-channel code cloned
+		// once here for the same reason; we now clone N times per frame.
+		for i, c := range joined {
+			pkt := make([]byte, n)
+			copy(pkt, opusBuf[:n])
+			select {
+			case c.OpusSend() <- pkt:
+			default:
+				log.Printf("Warning: OpusSend channel full for connection %d (channel %s), dropping packet",
+					i, joinedIDs[i])
+			}
 		}
 	}
+}
+
+// shortChannelIDs returns, for each index into d.config.ChannelIDs, the
+// channel ID truncated to its first 8 characters for use in per-packet log
+// lines. The full ID is too noisy for a log that can fire every 20ms when a
+// UDP send is backed up; 8 chars is enough to correlate against the startup
+// "channels %v" log line while staying debuggable. Returns empty strings for
+// out-of-range indices (defensive; should never happen given how joinedIdx is
+// built).
+func (d *Daemon) shortChannelIDs(idxs []int) []string {
+	out := make([]string, len(idxs))
+	for i, idx := range idxs {
+		if idx >= 0 && idx < len(d.config.ChannelIDs) {
+			id := d.config.ChannelIDs[idx]
+			if len(id) > 8 {
+				id = id[:8]
+			}
+			out[i] = id
+		}
+	}
+	return out
 }

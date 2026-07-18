@@ -75,9 +75,14 @@ Toolchain version pinned in `go.mod`: `go 1.26.5`.
   (play-only bot); the UI badge is expected and does not affect sending.
 - **Async start architecture.** The daemon returns `OK` to the shairport
   `run_this_before_play_begins` hook *before* the Discord voice WS/UDP
-  handshake completes, bounded by `VOICE_READY_TIMEOUT` (default 30s). A
-  handshake failure produces one clean join+disconnect per AirPlay attempt,
-  not the old retry loop. Diagnose via `journalctl -u pinstrel -f`.
+  handshake completes, bounded by `VOICE_READY_TIMEOUT` (default 30s). With
+  `DISCORD_CHANNEL_IDS` listing N channels the fan-out launches one
+  `JoinChannel` goroutine per channel racing against this same shared
+  wall-clock budget (not `VOICE_READY_TIMEOUT/N`). Partial-join semantics:
+  each failed handshake produces one clean join+disconnect for that channel;
+  successfully-joined channels keep streaming. The whole attempt only aborts
+  if zero channels joined. Diagnose via `journalctl -u pinstrel -f` — look for
+  `Successfully joined N/M voice channels`.
 - **A goroutine opened on the FIFO for reading can block forever** if the
   voice join fails before shairport opens the writer side. Go has no portable
   way to interrupt a blocking FIFO `open`. This is a known accepted tradeoff

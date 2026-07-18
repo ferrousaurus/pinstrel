@@ -59,11 +59,15 @@ func (c *mockConn) wasDisconnected() bool {
 }
 
 // mockSession is a test voice.Session. It lets the test control JoinChannel
-// behavior (success/error/blocking) to exercise the stream state machine.
+// behavior (success/error/blocking) to exercise the stream state machine. For
+// multi-channel fan-out tests, set joinConnsByChannel to return a distinct
+// connection per channel ID; otherwise JoinChannel returns the shared
+// joinConn for every call (which is fine for the single-channel fixtures).
 type mockSession struct {
-	joinErr   error
-	joinConn  *mockConn
-	joinDelay time.Duration
+	joinErr             error
+	joinConn            *mockConn
+	joinConnsByChannel  map[string]*mockConn
+	joinDelay           time.Duration
 }
 
 func (s *mockSession) Open() error     { return nil }
@@ -78,6 +82,16 @@ func (s *mockSession) JoinChannel(guildID, channelID string, mute, deaf bool) (v
 	}
 	if s.joinErr != nil {
 		return nil, s.joinErr
+	}
+	if c, ok := s.joinConnsByChannel[channelID]; ok {
+		return c, nil
+	}
+	if s.joinConn == nil {
+		// No connection configured for this channel → simulate a
+		// real-world failure (e.g. permissions). Returning (nil, nil)
+		// here would be a successful join with no connection, which
+		// streamLoop can't do anything with — so we fail it explicitly.
+		return nil, errors.New("mockSession: no connection configured for channel " + channelID)
 	}
 	return s.joinConn, nil
 }
@@ -100,7 +114,7 @@ func (nopReadCloser) Close() error { return nil }
 func testConfig() *config.Config {
 	return &config.Config{
 		DiscordToken:      "test-token",
-		ChannelID:         "test-channel",
+		ChannelIDs:        []string{"test-channel"},
 		Bitrate:           128000,
 		PipePath:          "/tmp/test-pipe",
 		SocketPath:        "/tmp/test-sock",
@@ -137,12 +151,14 @@ func TestNew_RequiresToken(t *testing.T) {
 	}
 }
 
-func TestNew_RequiresChannelID(t *testing.T) {
+func TestNew_RequiresChannelIDs(t *testing.T) {
+	// Empty list (or all-empty entries after normalization at LoadConfig
+	// time, which the daemon never sees) must be a hard error: the daemon
+	// has nothing to broadcast to.
 	cfg := testConfig()
-	cfg.ChannelID = ""
-	_, err := New(cfg, &mockSession{})
-	if err == nil {
-		t.Fatal("expected error for empty channel ID, got nil")
+	cfg.ChannelIDs = nil
+	if _, err := New(cfg, &mockSession{}); err == nil {
+		t.Fatal("expected error for nil ChannelIDs, got nil")
 	}
 }
 
@@ -294,4 +310,163 @@ func TestStreamLoop_StopDuringJoin(t *testing.T) {
 		t.Fatalf("HandleStop: %v", err)
 	}
 	waitDone(t, d, 3*time.Second)
+}
+
+func TestStreamLoop_MultiChannelFanOut(t *testing.T) {
+	// Two configured channels get two distinct mock connections. Both should
+	// join concurrently, both should receive Speaking(true), both should
+	// receive Opus packets, and both should be Disconnected on cleanup.
+	cfg := testConfig()
+	cfg.ChannelIDs = []string{"chan-a", "chan-b"}
+	cfg.VoiceReadyTimeout = 2
+
+	connA := newMockConn(8)
+	connB := newMockConn(8)
+	sess := &mockSession{
+		joinConnsByChannel: map[string]*mockConn{
+			"chan-a": connA,
+			"chan-b": connB,
+		},
+	}
+	// One PCM frame then EOF — enough for one Opus packet to flow to both vcs.
+	frame := make([]byte, audio.FrameBytes)
+	opener := &mockOpener{r: nopReadCloser{Reader: bytes.NewReader(frame)}}
+	d, err := NewWithOpener(cfg, sess, opener)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	if err := d.HandleStart(); err != nil {
+		t.Fatalf("HandleStart: %v", err)
+	}
+	waitDone(t, d, 3*time.Second)
+
+	// Both connections received Speaking(true) on enter and Speaking(false)
+	// on cleanup, and were disconnected.
+	for label, c := range map[string]*mockConn{"a": connA, "b": connB} {
+		calls := c.speakingCalls()
+		trues := 0
+		for _, v := range calls {
+			if v {
+				trues++
+			}
+		}
+		if trues != 1 {
+			t.Errorf("conn %s: expected exactly 1 Speaking(true), got %d (calls: %v)", label, trues, calls)
+		}
+		if !c.wasDisconnected() {
+			t.Errorf("conn %s: expected Disconnect() to be called", label)
+		}
+	}
+
+	// Both connections received at least one Opus packet (the single frame's
+	// worth). Drain whatever's in each buffer and assert it's non-empty.
+	gotA := drainConn(connA)
+	gotB := drainConn(connB)
+	if len(gotA) == 0 {
+		t.Error("conn a: expected at least one Opus packet, got 0")
+	}
+	if len(gotB) == 0 {
+		t.Error("conn b: expected at least one Opus packet, got 0")
+	}
+	// Sanity: the fan-out sends the SAME bytes (encoded once, copied per
+	// connection) so the first packets should be byte-equal.
+	if len(gotA) > 0 && len(gotB) > 0 && !bytes.Equal(gotA[0], gotB[0]) {
+		t.Errorf("fan-out packets differ: a=%v b=%v", gotA[0], gotB[0])
+	}
+}
+
+// drainConn extracts all buffered Opus packets from a mockConn without
+// blocking. Returns nil if the channel is empty.
+func drainConn(c *mockConn) [][]byte {
+	var out [][]byte
+	for {
+		select {
+		case pkt := <-c.opusSend:
+			out = append(out, pkt)
+		default:
+			return out
+		}
+	}
+}
+
+func TestStreamLoop_PartialJoin(t *testing.T) {
+	// Two configured channels: chan-a succeeds, chan-b fails. streamLoop
+	// should skip chan-b, broadcast to chan-a only, and NOT abort the whole
+	// attempt (which was the all-or-nothing alternative).
+	cfg := testConfig()
+	cfg.ChannelIDs = []string{"chan-a", "chan-b"}
+	cfg.VoiceReadyTimeout = 2
+
+	connA := newMockConn(8)
+	connB := newMockConn(8) // should never receive packets
+	sess := &mockSession{
+		// No entry for chan-b → JoinChannel falls through to the nil joinConn
+		// path and returns the "no joinConn configured" error. That's the
+		// simulated join failure.
+		joinConnsByChannel: map[string]*mockConn{
+			"chan-a": connA,
+			// chan-b intentionally absent
+		},
+	}
+	frame := make([]byte, audio.FrameBytes)
+	opener := &mockOpener{r: nopReadCloser{Reader: bytes.NewReader(frame)}}
+	d, err := NewWithOpener(cfg, sess, opener)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	if err := d.HandleStart(); err != nil {
+		t.Fatalf("HandleStart: %v", err)
+	}
+	waitDone(t, d, 3*time.Second)
+
+	// chan-a: joined, streamed, cleaned up.
+	if !connA.wasDisconnected() {
+		t.Error("conn a: expected Disconnect after EOF")
+	}
+	if gotA := drainConn(connA); len(gotA) == 0 {
+		t.Error("conn a: expected at least one Opus packet")
+	}
+	// chan-b: never joined, so it should never have received any
+	// Speaking/Disconnect/Opus calls.
+	if len(connB.speakingCalls()) != 0 {
+		t.Errorf("conn b: expected no Speaking calls, got %v", connB.speakingCalls())
+	}
+	if connB.wasDisconnected() {
+		t.Error("conn b: should not have been Disconnected (never joined)")
+	}
+	if gotB := drainConn(connB); len(gotB) != 0 {
+		t.Errorf("conn b: expected no Opus packets, got %d", len(gotB))
+	}
+}
+
+func TestStreamLoop_AllJoinsFail(t *testing.T) {
+	// Two configured channels, both fail. streamLoop should abort cleanly
+	// with no packets streamed; no connection could have been established.
+	cfg := testConfig()
+	cfg.ChannelIDs = []string{"chan-a", "chan-b"}
+	cfg.VoiceReadyTimeout = 2
+
+	// joinConnsByChannel has no entries for either channel → JoinChannel
+	// returns the "no joinConn configured" error for both.
+	sess := &mockSession{}
+	frame := make([]byte, audio.FrameBytes)
+	opener := &mockOpener{r: nopReadCloser{Reader: bytes.NewReader(frame)}}
+	d, err := NewWithOpener(cfg, sess, opener)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	if err := d.HandleStart(); err != nil {
+		t.Fatalf("HandleStart: %v", err)
+	}
+	waitDone(t, d, 3*time.Second)
+
+	// No connection was ever stored, so cleanup is a no-op for vcs. The
+	// important assertion is that streamLoop exited (waitDone enforces it)
+	// and that the daemon is back in the idle state for a future start.
+	if d.isStreaming || d.joining {
+		t.Errorf("expected idle flags, got streaming=%v joining=%v", d.isStreaming, d.joining)
+	}
 }

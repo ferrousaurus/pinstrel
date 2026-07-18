@@ -5,10 +5,11 @@
 ## Features
 
 - **Zero-Latency Stream Start/Stop**: Intercepts AirPlay session signals from `shairport-sync` using local IPC (Unix domain sockets).
-- **Auto-Discovery**: Resolves the Discord Guild (server) ID automatically based on the configured Voice Channel ID.
+- **Auto-Discovery**: Resolves the Discord Guild (server) ID automatically for each configured Voice Channel ID.
 - **Embedded Opus Encoding**: Uses CGO bindings to compile with standard `libopus`, performing high-performance, CPU-efficient audio encoding directly on the Pi.
 - **Configurable Bitrate**: Streams high-fidelity audio up to the Discord channel limit (defaults to 128kbps).
 - **Pure-Pipe Routing**: Resamples AirPlay audio (44.1kHz) to Discord voice standards (48kHz) inside `shairport-sync` to avoid running CPU-heavy subprocesses (like `ffmpeg`).
+- **Multi-Channel Broadcast**: Configured to fan out a single AirPlay stream to one or more Discord voice channels concurrently — same Opus-encoded bytes copied to each connection per 20ms frame. Channels may live in different guilds; partial-join semantics mean a single channel's handshake failure doesn't kill the rest.
 
 ---
 
@@ -24,7 +25,7 @@
      - **General**: `View Channel`
      - **Voice**: `Connect`, `Speak`, `Use Voice Activity`
 6. Invite the bot to your Discord server.
-7. Copy the **ID of the voice channel** you want the bot to join (enable Discord Developer Mode to right-click and copy IDs).
+7. Copy the **ID of every voice channel** you want the bot to join (enable Discord Developer Mode to right-click and copy IDs). You can list one or many in `DISCORD_CHANNEL_IDS` later.
 
 ---
 
@@ -137,16 +138,31 @@ Create the configuration file at `/etc/pinstrel.toml`:
 # /etc/pinstrel.toml
 
 DISCORD_TOKEN = "YOUR_DISCORD_BOT_TOKEN"
-DISCORD_CHANNEL_ID = "YOUR_DISCORD_VOICE_CHANNEL_ID"
+
+# One or more Discord voice channel IDs to broadcast to simultaneously. The
+# bot joins every channel listed here and forwards the same Opus stream to
+# each. Channels may live in different guilds/servers. Whitespace around each
+# entry is trimmed and empty entries are dropped at load time, so a stray
+# trailing comma is safe. The bot must have Connect/Speak/Use Voice Activity
+# permissions on every listed channel.
+#
+# Migration note: prior versions accepted a single comma-separated string
+# under DISCORD_CHANNEL_ID (singular). That string form is no longer parsed;
+# the value MUST be a TOML array, even for a single channel.
+DISCORD_CHANNEL_IDS = ["YOUR_DISCORD_VOICE_CHANNEL_ID"]
 
 # Optional settings (defaults shown below)
 BITRATE = 128000
 PIPE_PATH = "/tmp/shairport-sync-audio"
 SOCKET_PATH = "/tmp/pinstrel.sock"
-# Seconds pinstrel waits for the full Discord voice handshake
-# (VOICE_SERVER_UPDATE -> voice WS OP2 -> UDP IP-discovery -> Select Protocol)
-# before abandoning the join and disconnecting cleanly. Discord's own internal
-# wait is ~10s; 30s gives comfortable headroom for slow voice-server rotation.
+# Seconds pinstrel waits for the full Discord voice handshake across all
+# configured channels (VOICE_SERVER_UPDATE -> voice WS OP2 -> UDP IP-discovery
+# -> Select Protocol) before abandoning the pending joins and disconnecting
+# cleanly. With N channels this is a shared wall-clock budget — every
+# concurrent JoinChannel races against this same window, not
+# VOICE_READY_TIMEOUT/N per channel. Discord's own internal wait is ~10s; 30s
+# gives comfortable headroom for slow voice-server rotation, MLS group setup
+# on busy channels, and multi-channel fan-out.
 VOICE_READY_TIMEOUT = 30
 ```
 
@@ -200,7 +216,7 @@ The first should print the `replace` line above; the second should resolve `gith
 2. When you stop AirPlay playback or disconnect:
    - `shairport-sync` executes the script hook: `/usr/local/bin/pinstrel stop` (triggered after the configured `session_timeout` of 10 seconds).
    - The CLI client sends a `stop` command to `/tmp/pinstrel.sock`.
-   - The daemon closes the pipe, stops the streaming loop, and cleanly disconnects from the voice channel (sends Discord the nil-channel OP4 so no ghost presence remains).
+   - The daemon closes the pipe, stops the streaming loop, and cleanly disconnects from every joined voice channel (one nil-channel OP4 per connection so no ghost presence remains in any channel).
 
 ## Troubleshooting
 
@@ -219,7 +235,7 @@ The first should print the `replace` line above; the second should resolve `gith
 - **`could not connect to pinstrel daemon ... no such file or directory` from shairport-sync**:
   Almost always means the pinstrel systemd unit has `PrivateTmp=true` enabled (or another form of `/tmp` isolation). A private `/tmp` makes both `/tmp/pinstrel.sock` and the audio FIFO `/tmp/shairport-sync-audio` invisible to `shairport-sync`, which runs in the host `/tmp` namespace. The shipped `pinstrel.service` deliberately omits `PrivateTmp`; do not re-add it. If you customized the unit, remove `PrivateTmp=true` and run `sudo systemctl daemon-reload && sudo systemctl restart pinstrel`.
 - **Bot joins but stays deafened and `ERR: failed to join voice channel: timeout waiting for voice` appears in shairport-sync logs**:
-  This is the symptom you'll see if the Discord voice WS/UDP handshake doesn't complete within discordgo's ~10s internal `waitUntilConnected` poll. As of pinstrel's DAVE migration (see the **Maintenance** section below) and the async-start architecture, the daemon returns `OK` to shairport's `run_this_before_play_begins` hook *before* the handshake completes — so a handshake failure no longer blocks shairport's own hook timeout, and the old "drops and rejoins every ~25s" retry loop is gone. What you'll see instead is one clean failed join + disconnect per AirPlay attempt, with the underlying cause visible in `sudo journalctl -u pinstrel -f`.
+  This is the symptom you'll see if the Discord voice WS/UDP handshake doesn't complete within discordgo's ~10s internal `waitUntilConnected` poll. As of pinstrel's DAVE migration (see the **Maintenance** section below) and the async-start architecture, the daemon returns `OK` to shairport's `run_this_before_play_begins` hook *before* the handshake completes — so a handshake failure no longer blocks shairport's own hook timeout, and the old "drops and rejoins every ~25s" retry loop is gone. With multi-channel broadcast configured, each AirPlay attempt produces up to one clean failed join + disconnect per configured channel (the partial-join fan-out: failed channels are skipped, the successfully-joined ones keep streaming). The underlying cause is visible in `sudo journalctl -u pinstrel -f` — look for the `Successfully joined N/M voice channels` line to see how many made it.
 
   ### Root cause: Discord's DAVE (E2EE) enforcement
 
@@ -266,7 +282,7 @@ The first should print the `replace` line above; the second should resolve `gith
 
   - **`VOICE_STATE_UPDATE` never logged for the bot** → gateway never dispatched, or `s.State.User.ID` is unpopulated. Verify the bot token is correct and that the bot is in the server.
   - **`VOICE_SERVER_UPDATE` never logged** → the bot lacks `Connect`/`Speak`/`Use Voice Activity` permissions on the target channel (see Section 1 step 5), or the channel id is wrong.
-  - **`Voice join exceeded ... deadline — abandoning`** from pinstrel itself (not from discordgo) → the handshake stalled longer than `VOICE_READY_TIMEOUT` (default 30s). The bot is auto-disconnected (gateway nil-channel OP4) so no "ghost" lingers; raise the timeout only if you have evidence of legitimately slow voice-server rotation or a slow MLS group setup on a very busy channel.
+  - **`Voice joins exceeded ... deadline — abandoning`** from pinstrel itself (not from discordgo) → at least one handshake stalled longer than `VOICE_READY_TIMEOUT` (default 30s). Pending joins are abandoned (their goroutines time out internally ~10s later) but already-joined channels keep streaming — see the `Successfully joined N/M voice channels` log line. With a single configured channel this is the severe "no audio" case; with N channels it's a partial-outage case. Raise the timeout only if you have evidence of legitimately slow voice-server rotation, slow MLS group setup on very busy channels, or fan-out contention with N large; lower it if you want stuck joins to fail fast and let the partial-join fan-out take over.
 - **Bot appears "deafened" in the channel UI even when audio is playing correctly**:
   Intentional. pinstrel is a play-only bot; it joins with `deaf=true` so Discord knows it won't receive audio. The "deafened" UI badge is the visual side-effect of that optimization and does not affect sending.
 - **A leaked goroutine blocks on FIFO open after a handshake failure**:

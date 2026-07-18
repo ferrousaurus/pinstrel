@@ -6,7 +6,7 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-# The daemon resolves the Discord guild from the channel ID and then keeps a persistent
+# The daemon resolves the Discord guild for each configured channel ID and then keeps a persistent
 # Discord gateway connection plus a Unix domain socket for IPC with shairport-sync.
 # /etc/pinstrel.toml is required; the daemon also chmods the socket/pipe to be
 # world-writable so the shairport-sync user can talk to it without sharing a group.
