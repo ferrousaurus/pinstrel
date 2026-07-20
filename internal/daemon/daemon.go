@@ -481,10 +481,28 @@ func (d *Daemon) streamLoop() {
 		// per 20ms frame.
 		pkt := make([]byte, n)
 		copy(pkt, opusBuf[:n])
+
+		// Backpressure the producer to the consumer's 20ms tick rate rather
+		// than free-running against shairport's source clock. The OpusSend
+		// channel's 16-frame (≈320ms) buffer absorbs jitter; when it fills,
+		// blocking here throttles the FIFO read, which blocks shairport's
+		// write() on the named pipe and back-pressures the AirPlay transport.
+		// Previously a select-default arm dropped the packet instead, which
+		// decoupled the producer from the consumer's real-time pace and
+		// surfaced as audible speedup (dropped frames skip source audio
+		// forward while the RTP timestamp still advances by 960) and slowdown
+		// (when shairport starved the channel and discordgo's free-running
+		// 20ms ticker stretched the inter-packet gap). The stopCh arm keeps
+		// teardown responsive when the voice connection dies: discordgo's
+		// opusSender exits via its <-close arm without closing OpusSend, so
+		// a plain blocking send would otherwise wedge the producer. stopCh is
+		// signalled within stopPollInterval (100ms) by the isStreaming-poll
+		// goroutine above on HandleStop / cleanupStreamState.
 		select {
 		case vc.OpusSend() <- pkt:
-		default:
-			log.Printf("Warning: OpusSend channel full, dropping packet")
+		case <-stopCh:
+			log.Println("Stop received during Opus send; aborting stream.")
+			return
 		}
 	}
 }
