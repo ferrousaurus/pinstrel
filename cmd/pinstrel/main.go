@@ -10,8 +10,8 @@ import (
 
 	"pinstrel/internal/config"
 	"pinstrel/internal/daemon"
+	"pinstrel/internal/discord"
 	"pinstrel/internal/ipc"
-	"pinstrel/internal/voice"
 )
 
 // configPath is the single canonical location of the pinstrel TOML config.
@@ -28,7 +28,7 @@ Commands:
 `
 
 func runDaemon(cfg *config.Config) {
-	v, err := voice.New(cfg.DiscordToken)
+	v, err := discord.New(cfg.DiscordToken)
 	if err != nil {
 		log.Fatalf("Error initializing Discord session: %v", err)
 	}

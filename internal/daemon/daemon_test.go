@@ -4,18 +4,19 @@ import (
 	"bytes"
 	"errors"
 	"io"
+	"os"
 	"sync"
 	"testing"
 	"time"
 
 	"pinstrel/internal/audio"
 	"pinstrel/internal/config"
-	"pinstrel/internal/voice"
+	"pinstrel/internal/discord"
 )
 
 // --- test mocks ---
 
-// mockConn is a test voice.Connection. It records Speaking/Disconnect and
+// mockConn is a test discord.Connection. It records Speaking/Disconnect and
 // exposes a buffered OpusSend the test can drain.
 type mockConn struct {
 	mu           sync.Mutex
@@ -58,43 +59,57 @@ func (c *mockConn) wasDisconnected() bool {
 	return c.disconnected
 }
 
-// mockSession is a test voice.Session. It lets the test control JoinChannel
-// behavior (success/error/blocking) to exercise the stream state machine. For
-// multi-channel fan-out tests, set joinConnsByChannel to return a distinct
-// connection per channel ID; otherwise JoinChannel returns the shared
-// joinConn for every call (which is fine for the single-channel fixtures).
+// mockSession is a test discord.Session. It lets the test control
+// ResolveUserVoiceState's and JoinChannel's behavior (success/error/blocking)
+// to exercise the stream state machine. Set resolveGuild/resolveChannel to
+// non-empty strings for a successful "user is in voice" resolution; leave
+// resolveChannel empty (or set resolveErr to one of the sentinels) to simulate
+// the hard-reject paths.
 type mockSession struct {
-	joinErr             error
-	joinConn            *mockConn
-	joinConnsByChannel  map[string]*mockConn
-	joinDelay           time.Duration
+	joinErr        error
+	joinConn       *mockConn
+	joinDelay      time.Duration
+	resolveGuild   string
+	resolveChannel string
+	resolveErr     error
 }
 
 func (s *mockSession) Open() error     { return nil }
 func (s *mockSession) Close() error    { return nil }
 func (s *mockSession) AddDiagnostics() {}
-func (s *mockSession) ResolveGuild(channelID string) (string, error) {
-	return "guild-test", nil
+
+// ResolveUserVoiceState mirrors the real adapter's contract. With resolveErr
+// set, returns the error verbatim (used to simulate ErrUserNotInVoice via the
+// sentinel directly, or ErrUserSharesNoGuild). With resolveChannel empty,
+// falls through to the not-in-voice sentinel. Otherwise returns the
+// configured guild+channel pair.
+func (s *mockSession) ResolveUserVoiceState(userID string) (string, string, error) {
+	if s.resolveErr != nil {
+		return "", "", s.resolveErr
+	}
+	if s.resolveChannel == "" {
+		return "", "", discord.ErrUserNotInVoice
+	}
+	return s.resolveGuild, s.resolveChannel, nil
 }
-func (s *mockSession) JoinChannel(guildID, channelID string, mute, deaf bool) (voice.Connection, error) {
+
+func (s *mockSession) JoinChannel(guildID, channelID string, mute, deaf bool) (discord.Connection, error) {
 	if s.joinDelay > 0 {
 		time.Sleep(s.joinDelay)
 	}
 	if s.joinErr != nil {
 		return nil, s.joinErr
 	}
-	if c, ok := s.joinConnsByChannel[channelID]; ok {
-		return c, nil
-	}
 	if s.joinConn == nil {
-		// No connection configured for this channel → simulate a
-		// real-world failure (e.g. permissions). Returning (nil, nil)
-		// here would be a successful join with no connection, which
-		// streamLoop can't do anything with — so we fail it explicitly.
-		return nil, errors.New("mockSession: no connection configured for channel " + channelID)
+		return nil, errors.New("mockSession: no joinConn configured")
 	}
 	return s.joinConn, nil
 }
+
+// RegisterSlashCommands is a no-op for the mock; the daemon tests don't
+// exercise slash dispatch, only that Session is satisfiable so daemon.Run
+// can proceed past the registration step.
+func (s *mockSession) RegisterSlashCommands(_ []discord.Command) error { return nil }
 
 // mockOpener returns a pre-built reader (no blocking FIFO open).
 type mockOpener struct {
@@ -114,11 +129,21 @@ func (nopReadCloser) Close() error { return nil }
 func testConfig() *config.Config {
 	return &config.Config{
 		DiscordToken:      "test-token",
-		ChannelIDs:        []string{"test-channel"},
+		DiscordUserID:     "test-user",
 		Bitrate:           128000,
 		PipePath:          "/tmp/test-pipe",
 		SocketPath:        "/tmp/test-sock",
 		VoiceReadyTimeout: 5,
+	}
+}
+
+// inVoiceSession returns a mockSession configured to resolve the configured
+// test-user into a fixed channel/guild and join with the supplied conn.
+func inVoiceSession(conn *mockConn) *mockSession {
+	return &mockSession{
+		resolveGuild:   "guild-test",
+		resolveChannel: "test-channel",
+		joinConn:       conn,
 	}
 }
 
@@ -140,6 +165,17 @@ func waitDone(t *testing.T, d *Daemon, timeout time.Duration) {
 	t.Fatalf("daemon still streaming/joining after %s", timeout)
 }
 
+// removeIfExists deletes a file/FIFO at path, ignoring "not exist" errors.
+// Used by the hard-reject tests to clean up any leftover FIFO from a prior
+// run before the test asserts that the daemon did NOT create one.
+func removeIfExists(path string) error {
+	err := os.Remove(path)
+	if err != nil && os.IsNotExist(err) {
+		return nil
+	}
+	return err
+}
+
 // --- tests ---
 
 func TestNew_RequiresToken(t *testing.T) {
@@ -151,14 +187,13 @@ func TestNew_RequiresToken(t *testing.T) {
 	}
 }
 
-func TestNew_RequiresChannelIDs(t *testing.T) {
-	// Empty list (or all-empty entries after normalization at LoadConfig
-	// time, which the daemon never sees) must be a hard error: the daemon
-	// has nothing to broadcast to.
+func TestNew_RequiresUserID(t *testing.T) {
+	// Empty DiscordUserID must be a hard error: the daemon has nobody to
+	// follow.
 	cfg := testConfig()
-	cfg.ChannelIDs = nil
+	cfg.DiscordUserID = ""
 	if _, err := New(cfg, &mockSession{}); err == nil {
-		t.Fatal("expected error for nil ChannelIDs, got nil")
+		t.Fatal("expected error for nil DiscordUserID, got nil")
 	}
 }
 
@@ -167,7 +202,7 @@ func TestHandleStart_Idempotent(t *testing.T) {
 	cfg.VoiceReadyTimeout = 1
 	conn := newMockConn(8)
 	opener := &mockOpener{r: nopReadCloser{Reader: bytes.NewReader(make([]byte, audio.FrameBytes))}}
-	d, err := NewWithOpener(cfg, &mockSession{joinConn: conn}, opener)
+	d, err := NewWithOpener(cfg, inVoiceSession(conn), opener)
 	if err != nil {
 		t.Fatalf("NewWithOpener: %v", err)
 	}
@@ -196,7 +231,7 @@ func TestHandleStart_Idempotent(t *testing.T) {
 
 func TestHandleStop_WhenIdle(t *testing.T) {
 	cfg := testConfig()
-	d, err := NewWithOpener(cfg, &mockSession{joinConn: newMockConn(1)}, &mockOpener{r: nopReadCloser{Reader: bytes.NewReader(nil)}})
+	d, err := NewWithOpener(cfg, inVoiceSession(newMockConn(1)), &mockOpener{r: nopReadCloser{Reader: bytes.NewReader(nil)}})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -213,7 +248,7 @@ func TestStreamLoop_HappyPath_EOF(t *testing.T) {
 	conn := newMockConn(8)
 	frame := make([]byte, audio.FrameBytes)
 	opener := &mockOpener{r: nopReadCloser{Reader: bytes.NewReader(frame)}}
-	d, err := NewWithOpener(cfg, &mockSession{joinConn: conn}, opener)
+	d, err := NewWithOpener(cfg, inVoiceSession(conn), opener)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -245,7 +280,11 @@ func TestStreamLoop_JoinFailure(t *testing.T) {
 	cfg.VoiceReadyTimeout = 2
 	conn := newMockConn(8) // should never be used
 	opener := &mockOpener{r: nopReadCloser{Reader: bytes.NewReader(nil)}}
-	d, err := NewWithOpener(cfg, &mockSession{joinErr: errors.New("discord down")}, opener)
+	d, err := NewWithOpener(cfg, &mockSession{
+		resolveGuild:   "guild-test",
+		resolveChannel: "test-channel",
+		joinErr:        errors.New("discord down"),
+	}, opener)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -268,7 +307,7 @@ func TestStreamLoop_PipeOpenFailure(t *testing.T) {
 	cfg.VoiceReadyTimeout = 2
 	conn := newMockConn(8)
 	opener := &mockOpener{err: errors.New("pipe broken")}
-	d, err := NewWithOpener(cfg, &mockSession{joinConn: conn}, opener)
+	d, err := NewWithOpener(cfg, inVoiceSession(conn), opener)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -293,8 +332,10 @@ func TestStreamLoop_StopDuringJoin(t *testing.T) {
 	conn := newMockConn(8)
 	opener := &mockOpener{r: nopReadCloser{Reader: bytes.NewReader(nil)}}
 	d, err := NewWithOpener(cfg, &mockSession{
-		joinConn:  conn,
-		joinDelay: 500 * time.Millisecond,
+		resolveGuild:   "guild-test",
+		resolveChannel: "test-channel",
+		joinConn:       conn,
+		joinDelay:      500 * time.Millisecond,
 	}, opener)
 	if err != nil {
 		t.Fatalf("New: %v", err)
@@ -312,70 +353,6 @@ func TestStreamLoop_StopDuringJoin(t *testing.T) {
 	waitDone(t, d, 3*time.Second)
 }
 
-func TestStreamLoop_MultiChannelFanOut(t *testing.T) {
-	// Two configured channels get two distinct mock connections. Both should
-	// join concurrently, both should receive Speaking(true), both should
-	// receive Opus packets, and both should be Disconnected on cleanup.
-	cfg := testConfig()
-	cfg.ChannelIDs = []string{"chan-a", "chan-b"}
-	cfg.VoiceReadyTimeout = 2
-
-	connA := newMockConn(8)
-	connB := newMockConn(8)
-	sess := &mockSession{
-		joinConnsByChannel: map[string]*mockConn{
-			"chan-a": connA,
-			"chan-b": connB,
-		},
-	}
-	// One PCM frame then EOF — enough for one Opus packet to flow to both vcs.
-	frame := make([]byte, audio.FrameBytes)
-	opener := &mockOpener{r: nopReadCloser{Reader: bytes.NewReader(frame)}}
-	d, err := NewWithOpener(cfg, sess, opener)
-	if err != nil {
-		t.Fatalf("New: %v", err)
-	}
-
-	if err := d.HandleStart(); err != nil {
-		t.Fatalf("HandleStart: %v", err)
-	}
-	waitDone(t, d, 3*time.Second)
-
-	// Both connections received Speaking(true) on enter and Speaking(false)
-	// on cleanup, and were disconnected.
-	for label, c := range map[string]*mockConn{"a": connA, "b": connB} {
-		calls := c.speakingCalls()
-		trues := 0
-		for _, v := range calls {
-			if v {
-				trues++
-			}
-		}
-		if trues != 1 {
-			t.Errorf("conn %s: expected exactly 1 Speaking(true), got %d (calls: %v)", label, trues, calls)
-		}
-		if !c.wasDisconnected() {
-			t.Errorf("conn %s: expected Disconnect() to be called", label)
-		}
-	}
-
-	// Both connections received at least one Opus packet (the single frame's
-	// worth). Drain whatever's in each buffer and assert it's non-empty.
-	gotA := drainConn(connA)
-	gotB := drainConn(connB)
-	if len(gotA) == 0 {
-		t.Error("conn a: expected at least one Opus packet, got 0")
-	}
-	if len(gotB) == 0 {
-		t.Error("conn b: expected at least one Opus packet, got 0")
-	}
-	// Sanity: the fan-out sends the SAME bytes (encoded once, copied per
-	// connection) so the first packets should be byte-equal.
-	if len(gotA) > 0 && len(gotB) > 0 && !bytes.Equal(gotA[0], gotB[0]) {
-		t.Errorf("fan-out packets differ: a=%v b=%v", gotA[0], gotB[0])
-	}
-}
-
 // drainConn extracts all buffered Opus packets from a mockConn without
 // blocking. Returns nil if the channel is empty.
 func drainConn(c *mockConn) [][]byte {
@@ -390,83 +367,86 @@ func drainConn(c *mockConn) [][]byte {
 	}
 }
 
-func TestStreamLoop_PartialJoin(t *testing.T) {
-	// Two configured channels: chan-a succeeds, chan-b fails. streamLoop
-	// should skip chan-b, broadcast to chan-a only, and NOT abort the whole
-	// attempt (which was the all-or-nothing alternative).
+// TestHandleStart_UserNotInVoice verifies the Question 5 hard-reject contract:
+// when ResolveUserVoiceState returns ErrUserNotInVoice, HandleStart returns
+// the sentinel error, no streamLoop is spawned, and no FIFO is created.
+func TestHandleStart_UserNotInVoice(t *testing.T) {
 	cfg := testConfig()
-	cfg.ChannelIDs = []string{"chan-a", "chan-b"}
-	cfg.VoiceReadyTimeout = 2
+	// Point the pipe path at a tmp file we can Stat to confirm no FIFO was
+	// created on the error path.
+	cfg.PipePath = "/tmp/test-pinstrel-pipe-notcreated"
+	// Defensive: ensure no leftover from a prior run confuses the Stat.
+	_ = removeIfExists(cfg.PipePath)
 
-	connA := newMockConn(8)
-	connB := newMockConn(8) // should never receive packets
+	conn := newMockConn(8) // should never be used
+	opener := &mockOpener{r: nopReadCloser{Reader: bytes.NewReader(nil)}}
 	sess := &mockSession{
-		// No entry for chan-b → JoinChannel falls through to the nil joinConn
-		// path and returns the "no joinConn configured" error. That's the
-		// simulated join failure.
-		joinConnsByChannel: map[string]*mockConn{
-			"chan-a": connA,
-			// chan-b intentionally absent
-		},
+		resolveErr: discord.ErrUserNotInVoice,
+		joinConn:   conn,
 	}
-	frame := make([]byte, audio.FrameBytes)
-	opener := &mockOpener{r: nopReadCloser{Reader: bytes.NewReader(frame)}}
 	d, err := NewWithOpener(cfg, sess, opener)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
 
-	if err := d.HandleStart(); err != nil {
-		t.Fatalf("HandleStart: %v", err)
+	if err := d.HandleStart(); !errors.Is(err, discord.ErrUserNotInVoice) {
+		t.Fatalf("expected ErrUserNotInVoice, got %v", err)
 	}
-	waitDone(t, d, 3*time.Second)
 
-	// chan-a: joined, streamed, cleaned up.
-	if !connA.wasDisconnected() {
-		t.Error("conn a: expected Disconnect after EOF")
+	// streamLoop must not have spawned → flags stay clear.
+	d.activeMu.Lock()
+	streaming := d.isStreaming
+	joining := d.joining
+	d.activeMu.Unlock()
+	if streaming || joining {
+		t.Errorf("expected idle flags after hard-reject, got streaming=%v joining=%v", streaming, joining)
 	}
-	if gotA := drainConn(connA); len(gotA) == 0 {
-		t.Error("conn a: expected at least one Opus packet")
+
+	// No connection should have been touched.
+	if len(conn.speakingCalls()) != 0 {
+		t.Errorf("expected no Speaking calls, got %v", conn.speakingCalls())
 	}
-	// chan-b: never joined, so it should never have received any
-	// Speaking/Disconnect/Opus calls.
-	if len(connB.speakingCalls()) != 0 {
-		t.Errorf("conn b: expected no Speaking calls, got %v", connB.speakingCalls())
+	if conn.wasDisconnected() {
+		t.Error("expected Disconnect() NOT to be called on hard-reject")
 	}
-	if connB.wasDisconnected() {
-		t.Error("conn b: should not have been Disconnected (never joined)")
-	}
-	if gotB := drainConn(connB); len(gotB) != 0 {
-		t.Errorf("conn b: expected no Opus packets, got %d", len(gotB))
+
+	// No FIFO should have been created on the error path.
+	if _, err := os.Stat(cfg.PipePath); !os.IsNotExist(err) {
+		t.Errorf("expected FIFO to NOT exist after hard-reject; Stat err=%v", err)
 	}
 }
 
-func TestStreamLoop_AllJoinsFail(t *testing.T) {
-	// Two configured channels, both fail. streamLoop should abort cleanly
-	// with no packets streamed; no connection could have been established.
+// TestHandleStart_UserSharesNoGuild verifies the same hard-reject contract for
+// the "bot is in zero guilds" precondition from Question 7.
+func TestHandleStart_UserSharesNoGuild(t *testing.T) {
 	cfg := testConfig()
-	cfg.ChannelIDs = []string{"chan-a", "chan-b"}
-	cfg.VoiceReadyTimeout = 2
+	cfg.PipePath = "/tmp/test-pinstrel-pipe-noguild"
+	_ = removeIfExists(cfg.PipePath)
 
-	// joinConnsByChannel has no entries for either channel → JoinChannel
-	// returns the "no joinConn configured" error for both.
-	sess := &mockSession{}
-	frame := make([]byte, audio.FrameBytes)
-	opener := &mockOpener{r: nopReadCloser{Reader: bytes.NewReader(frame)}}
+	conn := newMockConn(8)
+	opener := &mockOpener{r: nopReadCloser{Reader: bytes.NewReader(nil)}}
+	sess := &mockSession{
+		resolveErr: discord.ErrUserSharesNoGuild,
+		joinConn:   conn,
+	}
 	d, err := NewWithOpener(cfg, sess, opener)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
 
-	if err := d.HandleStart(); err != nil {
-		t.Fatalf("HandleStart: %v", err)
+	if err := d.HandleStart(); !errors.Is(err, discord.ErrUserSharesNoGuild) {
+		t.Fatalf("expected ErrUserSharesNoGuild, got %v", err)
 	}
-	waitDone(t, d, 3*time.Second)
 
-	// No connection was ever stored, so cleanup is a no-op for vcs. The
-	// important assertion is that streamLoop exited (waitDone enforces it)
-	// and that the daemon is back in the idle state for a future start.
-	if d.isStreaming || d.joining {
-		t.Errorf("expected idle flags, got streaming=%v joining=%v", d.isStreaming, d.joining)
+	d.activeMu.Lock()
+	streaming := d.isStreaming
+	joining := d.joining
+	d.activeMu.Unlock()
+	if streaming || joining {
+		t.Errorf("expected idle flags after hard-reject, got streaming=%v joining=%v", streaming, joining)
+	}
+
+	if _, err := os.Stat(cfg.PipePath); !os.IsNotExist(err) {
+		t.Errorf("expected FIFO to NOT exist after hard-reject; Stat err=%v", err)
 	}
 }

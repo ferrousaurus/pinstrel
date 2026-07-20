@@ -123,3 +123,47 @@ func TestServerUnknownCommand(t *testing.T) {
 		t.Fatalf("expected no handler calls, got start=%d stop=%d", h.starts, h.stops)
 	}
 }
+
+// TestSendPropagatesErrors verifies the Question 11 contract: when the
+// daemon's HandleStart returns an error, Send returns a non-nil error whose
+// message matches the handler's error. This is load-bearing for the Question
+// 5 hard-reject contract — `pinstrel start` MUST exit non-zero so shairport's
+// run_this_before_play_begins hook aborts the AirPlay play.
+func TestSendPropagatesErrors(t *testing.T) {
+	dir := t.TempDir()
+	socketPath := dir + "/s.sock"
+	wantErr := "user not in voice"
+	h := &fakeHandler{startErr: errors.New(wantErr)}
+	startServer(t, socketPath, h)
+
+	// Wait for the listener via the existing retry helper to avoid a
+	// race if Send fires before the server accepts.
+	dialRetry(t, socketPath, "noop") // dial accepts connection before reading cmd
+	_ = wantErr
+
+	// Use Send directly. The first dialRetry above primes readiness; now Send
+	// should connect cleanly and surface the daemon's "ERR: ..." response
+	// as a Go error containing the handler's message.
+	if err := Send(socketPath, "start"); err == nil {
+		t.Fatal("expected Send to return a non-nil error for an ERR: response, got nil")
+	} else if !strings.Contains(err.Error(), wantErr) {
+		t.Fatalf("expected error to contain %q, got %q", wantErr, err.Error())
+	}
+}
+
+// TestSendReturnsNilOnOK verifies the happy-path converse of the above: an "OK"
+// response from the daemon leaves Send returning nil so `pinstrel start`
+// exits zero and shairport proceeds to open the audio pipe.
+func TestSendReturnsNilOnOK(t *testing.T) {
+	dir := t.TempDir()
+	socketPath := dir + "/s.sock"
+	h := &fakeHandler{}
+	startServer(t, socketPath, h)
+
+	// Prime readiness.
+	dialRetry(t, socketPath, "stop")
+
+	if err := Send(socketPath, "start"); err != nil {
+		t.Fatalf("expected Send to return nil for an OK response, got %v", err)
+	}
+}

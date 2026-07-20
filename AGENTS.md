@@ -11,7 +11,7 @@ idiomatic Go `cmd/` + `internal/` pattern:
 
 - `cmd/pinstrel/main.go` — subcommand dispatch: `daemon` (long-running), `start`/`stop` (one-shot IPC clients invoked by shairport-sync hooks).
 - `internal/daemon/` — the stream lifecycle state machine; orchestrates voice join, pipe read, Opus send, and cleanup. Implements `ipc.CommandHandler`.
-- `internal/voice/` — `voice.Session` / `voice.Connection` interfaces + a `*discordgo.Session` adapter. The narrow interface makes `streamLoop` testable without a live Discord connection.
+- `internal/discord/` — `discord.Session` / `discord.Connection` interfaces + a `*discordgo.Session` adapter, split across `client.go` (adapter core + `Session`), `voice.go` (voice-specific: `Connection`, `JoinChannel`, `ResolveUserVoiceState`, `AddDiagnostics`), and `slash.go` (slash command framework + builtins like `PingCommand`). The narrow `Session` interface makes `streamLoop` testable without a live Discord connection.
 - `internal/ipc/` — Unix-socket server (`CommandHandler` interface) + `Send` one-shot client used by `start`/`stop`.
 - `internal/audio/` — Opus encoder wrapper + pure `DecodePCMFrame` + frame constants.
 - `internal/config/` — TOML loader (`config.go` / `config_test.go`).
@@ -73,16 +73,24 @@ Toolchain version pinned in `go.mod`: `go 1.26.5`.
   service deliberately hardens everything *except* `/tmp` isolation.
 - **Bot joining "deafened" is intentional.** pinstrel sets `deaf=true`
   (play-only bot); the UI badge is expected and does not affect sending.
-- **Async start architecture.** The daemon returns `OK` to the shairport
+- **Async start architecture.** The daemon resolves the configured user's
+  current voice channel from the gateway `State` cache synchronously inside
+  `HandleStart`, then returns `OK` to the shairport
   `run_this_before_play_begins` hook *before* the Discord voice WS/UDP
-  handshake completes, bounded by `VOICE_READY_TIMEOUT` (default 30s). With
-  `DISCORD_CHANNEL_IDS` listing N channels the fan-out launches one
-  `JoinChannel` goroutine per channel racing against this same shared
-  wall-clock budget (not `VOICE_READY_TIMEOUT/N`). Partial-join semantics:
-  each failed handshake produces one clean join+disconnect for that channel;
-  successfully-joined channels keep streaming. The whole attempt only aborts
-  if zero channels joined. Diagnose via `journalctl -u pinstrel -f` — look for
-  `Successfully joined N/M voice channels`.
+  handshake completes, bounded by `VOICE_READY_TIMEOUT` (default 30s). If the
+  user is not in a voice channel (or shares no guild with the bot),
+  `HandleStart` returns a sentinel error (`discord.ErrUserNotInVoice` /
+  `discord.ErrUserSharesNoGuild`) *before* any side effects: no FIFO is
+  created, no flags are set, no `streamLoop` is spawned. The IPC server
+  surfaces this as `ERR: ...`, `ipc.Send` translates that into a Go error, and
+  `pinstrel start` exits non-zero — so the shairport hook aborts the AirPlay
+  play rather than proceeding to open a (rejected) FIFO writer. (Verify
+  shairport-sync's documented behavior on non-zero hook exit before relying
+  on the abort-the-play guarantee.) A single failed handshake (timeout or
+  error from `JoinChannel`) produces one clean join+disconnect and the
+  stream aborts; there is no partial-join fan-out to fall back on.
+  Diagnose via `journalctl -u pinstrel -f` — look for `Successfully joined
+  voice channel <id>`.
 - **A goroutine opened on the FIFO for reading can block forever** if the
   voice join fails before shairport opens the writer side. Go has no portable
   way to interrupt a blocking FIFO `open`. This is a known accepted tradeoff
