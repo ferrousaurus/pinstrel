@@ -31,6 +31,14 @@ type Config struct {
 	// single Discord voice WS/UDP handshake for an AirPlay attempt. The
 	// daemon's streamLoop re-checks this against a 0/negative value at runtime.
 	VoiceReadyTimeout int `toml:"VOICE_READY_TIMEOUT"`
+	// SourceSampleRate is the PCM sample rate (in Hz) expected on the audio FIFO
+	// backend (PIPE_PATH). Defaults to 44100 Hz (AirPlay's native sample rate,
+	// written by stock shairport-sync apt builds). Set to 48000 if shairport-sync
+	// is built --with-ffmpeg and configured for 48 kHz output (disables resampling).
+	SourceSampleRate int `toml:"SOURCE_SAMPLE_RATE"`
+	// TapsPerPhase is the number of FIR taps per polyphase phase when resampling.
+	// Defaults to 16. Range 4..128. Ignored when SOURCE_SAMPLE_RATE = 48000.
+	TapsPerPhase int `toml:"TAPS_PER_PHASE"`
 }
 
 // DefaultConfig returns a Config initialized with default values. Partial TOML
@@ -41,6 +49,8 @@ func DefaultConfig() *Config {
 		PipePath:          "/tmp/shairport-sync-audio",
 		SocketPath:        "/tmp/pinstrel.sock",
 		VoiceReadyTimeout: DefaultVoiceReadyTimeout,
+		SourceSampleRate:  44100,
+		TapsPerPhase:      16,
 	}
 }
 

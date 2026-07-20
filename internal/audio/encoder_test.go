@@ -71,4 +71,22 @@ func TestFrameConstants(t *testing.T) {
 	if FrameBytes != 3840 {
 		t.Errorf("FrameBytes: expected 3840, got %d", FrameBytes)
 	}
+	// Source (pre-resample) frame constants — what pinstrel reads from the
+	// FIFO per 20ms iteration. 44.1 kHz S16LE stereo is what the stock apt
+	// shairport-sync writes on Classic builds without --with-ffmpeg.
+	if SourceSampleRate != 44100 {
+		t.Errorf("SourceSampleRate: expected 44100, got %d", SourceSampleRate)
+	}
+	if SourceFrameSamples != 882 {
+		t.Errorf("SourceFrameSamples: expected 882, got %d", SourceFrameSamples)
+	}
+	if SourceFrameSize != 1764 {
+		t.Errorf("SourceFrameSize: expected 1764, got %d", SourceFrameSize)
+	}
+	if SourceFrameBytes != 3528 {
+		t.Errorf("SourceFrameBytes: expected 3528, got %d", SourceFrameBytes)
+	}
+	if DefaultTapsPerPhase != 16 {
+		t.Errorf("DefaultTapsPerPhase: expected 16, got %d", DefaultTapsPerPhase)
+	}
 }

@@ -20,6 +20,12 @@ func TestDefaultConfig(t *testing.T) {
 	if cfg.VoiceReadyTimeout != 30 {
 		t.Errorf("Expected default VoiceReadyTimeout to be 30 (seconds), got %d", cfg.VoiceReadyTimeout)
 	}
+	if cfg.SourceSampleRate != 44100 {
+		t.Errorf("Expected default SourceSampleRate to be 44100, got %d", cfg.SourceSampleRate)
+	}
+	if cfg.TapsPerPhase != 16 {
+		t.Errorf("Expected default TapsPerPhase to be 16, got %d", cfg.TapsPerPhase)
+	}
 }
 
 func TestLoadConfig_MissingFile(t *testing.T) {
@@ -52,6 +58,8 @@ DISCORD_USER_ID = "test-user-id"
 BITRATE = 192000
 PIPE_PATH = "/tmp/custom-audio"
 SOCKET_PATH = "/tmp/custom-socket.sock"
+SOURCE_SAMPLE_RATE = 48000
+TAPS_PER_PHASE = 32
 `
 	loadedCfg, _ := writeTestConfig(t, tomlData)
 
@@ -69,6 +77,12 @@ SOCKET_PATH = "/tmp/custom-socket.sock"
 	}
 	if loadedCfg.SocketPath != "/tmp/custom-socket.sock" {
 		t.Errorf("Expected SocketPath '/tmp/custom-socket.sock', got '%s'", loadedCfg.SocketPath)
+	}
+	if loadedCfg.SourceSampleRate != 48000 {
+		t.Errorf("Expected SourceSampleRate 48000, got %d", loadedCfg.SourceSampleRate)
+	}
+	if loadedCfg.TapsPerPhase != 32 {
+		t.Errorf("Expected TapsPerPhase 32, got %d", loadedCfg.TapsPerPhase)
 	}
 	// VoiceReadyTimeout is not set in the TOML, so it must fall back to the default.
 	if loadedCfg.VoiceReadyTimeout != 30 {

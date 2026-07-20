@@ -10,9 +10,8 @@ import (
 )
 
 const (
-	// SampleRate is the PCM sample rate Discord voice expects (48kHz).
-	// shairport-sync is configured to resample AirPlay's 44.1kHz up to this
-	// so pinstrel never resamples.
+	// SampleRate is the PCM sample rate Discord voice expects (48kHz). This is
+	// the rate pinstrel feeds the Opus encoder — the *output* of the resampler.
 	SampleRate = 48000
 	// NumChannels is the channel count (stereo) for both PCM input and the
 	// Opus encoder output.
@@ -28,6 +27,36 @@ const (
 	FrameSamples = SampleRate / 1000 * 20 // 960 samples per channel per 20ms frame
 	FrameSize    = FrameSamples * NumChannels
 	FrameBytes   = FrameSize * 2 // 16-bit samples
+
+	// SourceSampleRate is the S16LE PCM rate shairport-sync writes to the FIFO
+	// on the stock Raspberry Pi OS apt build. That package is a Classic AirPlay
+	// build without --with-ffmpeg, so it silently rejects `output_rate = 48000;`
+	// (logs a warning, falls back) and writes AirPlay's native 44.1 kHz S16LE
+	// regardless of the shairport config. pinstrel resamples 44.1→48 internally
+	// via a pure-Go polyphase FIR (resampler.go) before Opus encoding. If you
+	// rebuild shairport-sync with --with-ffmpeg (and the FIFO actually carries
+	// 48 kHz), set SOURCE_SAMPLE_RATE = 48000 in pinstrel.toml — pinstrel will
+	// pass PCM through to the Opus encoder without resampling.
+	SourceSampleRate = 44100
+	// PCM frame layout for a 20ms source frame at 44.1kHz stereo S16LE — this
+	// is how much pinstrel reads from the FIFO per Opus-frame iteration:
+	//   44100 Hz * 0.02s = 882 samples/channel
+	//   882 * 2 channels = 1764 total samples
+	//   1764 * 2 bytes/sample = 3528 bytes
+	// NOTE: the multiplication by 20ms must happen before the /1000 divide —
+	// `44100 / 1000 * 20` truncates to 44*20=880 in Go integer arithmetic,
+	// losing 2 samples/channel; `44100 * 20 / 1000` correctly yields 882.
+	SourceFrameSamples = SourceSampleRate * 20 / 1000 // 882 per channel per 20ms source frame
+	SourceFrameSize    = SourceFrameSamples * NumChannels
+	SourceFrameBytes   = SourceFrameSize * 2 // 3528 bytes
+
+	// DefaultTapsPerPhase is the default number of FIR taps per polyphase phase
+	// in the resampler. 16 is transparent for music on the Pi Zero 2 W
+	// (~1% of one A53 core for stereo 48kHz output). Range 4..128; lower trades
+	// CPU for high-frequency aliasing, higher is audiophile but rarely needed
+	// above 32. Configurable via TAPS_PER_PHASE in pinstrel.toml; ignored when
+	// SOURCE_SAMPLE_RATE = 48000 (resampler is passthrough).
+	DefaultTapsPerPhase = 16
 )
 
 // Encoder wraps an Opus encoder configured for Discord voice output.

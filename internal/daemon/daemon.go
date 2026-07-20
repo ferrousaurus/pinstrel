@@ -447,13 +447,25 @@ func (d *Daemon) streamLoop() {
 	// indicator, so we log nothing and move on.
 	_ = vc.Speaking(true)
 
-	byteBuf := make([]byte, audio.FrameBytes)
-	pcmBuf := make([]int16, audio.FrameSize)
+	resampler, err := audio.NewResampler(d.config.SourceSampleRate, audio.SampleRate, audio.NumChannels, d.config.TapsPerPhase)
+	if err != nil {
+		log.Printf("Failed to initialize resampler (%d -> %d Hz): %v", d.config.SourceSampleRate, audio.SampleRate, err)
+		d.cleanupStreamState()
+		return
+	}
+
+	sourceFrameSamples := d.config.SourceSampleRate * 20 / 1000
+	sourceFrameSize := sourceFrameSamples * audio.NumChannels
+	sourceFrameBytes := sourceFrameSize * 2
+
+	srcByteBuf := make([]byte, sourceFrameBytes)
+	srcPcmBuf := make([]int16, sourceFrameSize)
+	dstPcmBuf := make([]int16, audio.FrameSize)
 	opusBuf := make([]byte, audio.MaxPacketSize)
 
 	for {
-		// Read a full PCM frame. This blocks until the pipe has sufficient data.
-		_, err := io.ReadFull(pipe, byteBuf)
+		// Read a full PCM frame from the source pipe. This blocks until the pipe has sufficient data.
+		_, err := io.ReadFull(pipe, srcByteBuf)
 		if err != nil {
 			if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) || errors.Is(err, os.ErrClosed) {
 				log.Println("Named pipe EOF or connection closed.")
@@ -463,9 +475,14 @@ func (d *Daemon) streamLoop() {
 			return
 		}
 
-		audio.DecodePCMFrame(byteBuf, pcmBuf)
+		audio.DecodePCMFrame(srcByteBuf, srcPcmBuf)
 
-		n, err := enc.Encode(pcmBuf, opusBuf)
+		if _, _, err := resampler.ProcessFrame(srcPcmBuf, dstPcmBuf); err != nil {
+			log.Printf("Resampling error: %v", err)
+			return
+		}
+
+		n, err := enc.Encode(dstPcmBuf, opusBuf)
 		if err != nil {
 			log.Printf("Opus encoding error: %v", err)
 			return

@@ -127,14 +127,13 @@ func (nopReadCloser) Close() error { return nil }
 // --- helpers ---
 
 func testConfig() *config.Config {
-	return &config.Config{
-		DiscordToken:      "test-token",
-		DiscordUserID:     "test-user",
-		Bitrate:           128000,
-		PipePath:          "/tmp/test-pipe",
-		SocketPath:        "/tmp/test-sock",
-		VoiceReadyTimeout: 5,
-	}
+	cfg := config.DefaultConfig()
+	cfg.DiscordToken = "test-token"
+	cfg.DiscordUserID = "test-user"
+	cfg.PipePath = "/tmp/test-pipe"
+	cfg.SocketPath = "/tmp/test-sock"
+	cfg.VoiceReadyTimeout = 5
+	return cfg
 }
 
 // inVoiceSession returns a mockSession configured to resolve the configured
@@ -201,7 +200,7 @@ func TestHandleStart_Idempotent(t *testing.T) {
 	cfg := testConfig()
 	cfg.VoiceReadyTimeout = 1
 	conn := newMockConn(8)
-	opener := &mockOpener{r: nopReadCloser{Reader: bytes.NewReader(make([]byte, audio.FrameBytes))}}
+	opener := &mockOpener{r: nopReadCloser{Reader: bytes.NewReader(make([]byte, audio.SourceFrameBytes))}}
 	d, err := NewWithOpener(cfg, inVoiceSession(conn), opener)
 	if err != nil {
 		t.Fatalf("NewWithOpener: %v", err)
@@ -246,7 +245,7 @@ func TestStreamLoop_HappyPath_EOF(t *testing.T) {
 	cfg := testConfig()
 	cfg.VoiceReadyTimeout = 2
 	conn := newMockConn(8)
-	frame := make([]byte, audio.FrameBytes)
+	frame := make([]byte, audio.SourceFrameBytes)
 	opener := &mockOpener{r: nopReadCloser{Reader: bytes.NewReader(frame)}}
 	d, err := NewWithOpener(cfg, inVoiceSession(conn), opener)
 	if err != nil {
