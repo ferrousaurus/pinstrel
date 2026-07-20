@@ -15,8 +15,14 @@ sudo systemctl restart shairport-sync
 make
 sudo cp dist/pinstrel /usr/local/bin/
 
-read -p "Enter your bot's Token: " DISCORD_TOKEN
-read -p "Enter your User ID: " DISCORD_USER_ID
+# Fall back to interactive prompt only if environment variables are unset or empty
+if [ -z "$BOT_ID" ]; then
+    read -p "Enter BOT_ID: " BOT_ID
+fi
+
+if [ -z "$USER_ID" ]; then
+    read -p "Enter USER_ID: " USER_ID
+fi
 
 cat << EOF > "/etc/pinstrel.toml"
 DISCORD_TOKEN = "$DISCORD_TOKEN"
