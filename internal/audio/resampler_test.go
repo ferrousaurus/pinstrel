@@ -11,7 +11,7 @@ import (
 // contract test on the ratio and the frame-stability invariant
 // (882*160 == 960*147 == 141120).
 func TestResampler_Ratio(t *testing.T) {
-	r, err := NewResampler(SourceSampleRate, SampleRate, NumChannels, DefaultTapsPerPhase)
+	r, err := NewResampler(44100, SampleRate, NumChannels, DefaultTapsPerPhase)
 	if err != nil {
 		t.Fatalf("NewResampler: %v", err)
 	}
@@ -90,7 +90,9 @@ func TestResampler_Passthrough(t *testing.T) {
 // and decay to numerical noise after the impulse has scrolled past. This is
 // the standard polyphase FIR sanity check.
 func TestResampler_ImpulseResponse(t *testing.T) {
-	r, err := NewResampler(SourceSampleRate, SampleRate, 1, DefaultTapsPerPhase)
+	const inRate = 44100
+	const inSamples = inRate * 20 / 1000 // 882
+	r, err := NewResampler(inRate, SampleRate, 1, DefaultTapsPerPhase)
 	if err != nil {
 		t.Fatalf("NewResampler: %v", err)
 	}
@@ -98,8 +100,8 @@ func TestResampler_ImpulseResponse(t *testing.T) {
 	// Place the impulse at the center of the input frame so the Hann-windowed
 	// sinc has non-zero taps weighting it (putting the impulse at index 0
 	// would hit window edge taps = 0, producing all-zero output by design).
-	in := make([]int16, SourceFrameSamples)
-	in[SourceFrameSamples/2] = 32767
+	in := make([]int16, inSamples)
+	in[inSamples/2] = 32767
 	out := make([]int16, FrameSamples)
 
 	// First frame: excites the filter. Should produce non-zero output.
@@ -122,7 +124,7 @@ func TestResampler_ImpulseResponse(t *testing.T) {
 	// 4410 samples = ~100 ms of source audio — far longer than the
 	// (~16 taps * 160 phase / 44100 Hz ≈ 58 ms) impulse response extent.
 	for i := 0; i < 5; i++ {
-		zeroIn := make([]int16, SourceFrameSamples)
+		zeroIn := make([]int16, inSamples)
 		if _, _, err := r.ProcessFrame(zeroIn, out); err != nil {
 			t.Fatalf("ProcessFrame follow-up %d: %v", i, err)
 		}
@@ -144,24 +146,23 @@ func TestResampler_ImpulseResponse(t *testing.T) {
 // algorithm measures the resp at an exact frequency (no DFT bin-rounding),
 // making the test robust to the off-bin case without needing windowing.
 func TestResampler_Passband(t *testing.T) {
-	r, err := NewResampler(SourceSampleRate, SampleRate, 1, DefaultTapsPerPhase)
+	const inRate = 44100
+	const inSamples = inRate * 20 / 1000 // 882
+	r, err := NewResampler(inRate, SampleRate, 1, DefaultTapsPerPhase)
 	if err != nil {
 		t.Fatalf("NewResampler: %v", err)
 	}
 
-	// 10 source frames = 8820 samples at 44.1 kHz ≈ 200 ms of 1 kHz sine.
-	// 1 kHz at 44.1 kHz = 44.1 samples/cycle (non-integer, but Goertzel handles
-	// it); 1 kHz at 48 kHz = 48 samples/cycle (integer — zero leakage on output).
 	const numFrames = 10
 	const inAmp = 30000.0
 	const testFreq = 1000.0
-	in := make([]int16, SourceFrameSamples)
+	in := make([]int16, inSamples)
 	out := make([]int16, FrameSamples)
 	allOut := make([]int16, 0, numFrames*FrameSamples)
 	for i := 0; i < numFrames; i++ {
-		for j := 0; j < SourceFrameSamples; j++ {
-			tIdx := i*SourceFrameSamples + j
-			in[j] = int16(inAmp * math.Sin(2*math.Pi*testFreq*float64(tIdx)/float64(SourceSampleRate)))
+		for j := 0; j < inSamples; j++ {
+			tIdx := i*inSamples + j
+			in[j] = int16(inAmp * math.Sin(2*math.Pi*testFreq*float64(tIdx)/float64(inRate)))
 		}
 		if _, _, err := r.ProcessFrame(in, out); err != nil {
 			t.Fatalf("ProcessFrame %d: %v", i, err)
@@ -175,10 +176,6 @@ func TestResampler_Passband(t *testing.T) {
 	steady := allOut[skip:]
 	outAmp := goertzelAmp(steady, SampleRate, testFreq)
 
-	// Per-phase DC-gain normalization keeps passband roughly unity, with some
-	// ripple from the sinc shape. Accept ±3 dB: this is a correctness check
-	// (resampler preserved the tone at essentially its original amplitude),
-	// not a precise level-match.
 	ratio := outAmp / inAmp
 	dB := 20 * math.Log10(ratio)
 	if dB < -3.0 || dB > 3.0 {
@@ -192,26 +189,23 @@ func TestResampler_Passband(t *testing.T) {
 // stopband attenuation (which would manifest as audible aliasing on real
 // audio played through the pipeline).
 func TestResampler_Stopband(t *testing.T) {
-	r, err := NewResampler(SourceSampleRate, SampleRate, 1, DefaultTapsPerPhase)
+	const inRate = 44100
+	const inSamples = inRate * 20 / 1000 // 882
+	r, err := NewResampler(inRate, SampleRate, 1, DefaultTapsPerPhase)
 	if err != nil {
 		t.Fatalf("NewResampler: %v", err)
 	}
 
-	// 22000 Hz at 44.1 kHz gives 44100/22000 = 2.0045 samples/cycle; over
-	// 8820 samples that's 4400 cycles — exactly integer, so no end-effects
-	// leakage in the Goertzel measurement. 22 kHz is below source Nyquist
-	// (22050) and well past the cutoff (~19.85 kHz), squarely in the
-	// stopband of a Hann-windowed 16-tap polyphase FIR.
 	const numFrames = 10
 	const inAmp = 30000.0
 	const testFreq = 22000.0
-	in := make([]int16, SourceFrameSamples)
+	in := make([]int16, inSamples)
 	out := make([]int16, FrameSamples)
 	allOut := make([]int16, 0, numFrames*FrameSamples)
 	for i := 0; i < numFrames; i++ {
-		for j := 0; j < SourceFrameSamples; j++ {
-			tIdx := i*SourceFrameSamples + j
-			in[j] = int16(inAmp * math.Sin(2*math.Pi*testFreq*float64(tIdx)/float64(SourceSampleRate)))
+		for j := 0; j < inSamples; j++ {
+			tIdx := i*inSamples + j
+			in[j] = int16(inAmp * math.Sin(2*math.Pi*testFreq*float64(tIdx)/float64(inRate)))
 		}
 		if _, _, err := r.ProcessFrame(in, out); err != nil {
 			t.Fatalf("ProcessFrame: %v", err)
@@ -223,10 +217,6 @@ func TestResampler_Stopband(t *testing.T) {
 	steady := allOut[skip:]
 	outAmp := goertzelAmp(steady, SampleRate, testFreq)
 
-	// Stopband should be at least -25 dB at 22 kHz. The Hann window specifies
-	// -44 dB stopband deeper in; the 16-tap polyphase's transition region is
-	// wide, but 22 kHz is far enough past the 19.85 kHz cutoff to reach the
-	// deep stopband.
 	ratio := outAmp / inAmp
 	dB := 20 * math.Log10(ratio)
 	if dB > -25.0 {
@@ -237,11 +227,13 @@ func TestResampler_Stopband(t *testing.T) {
 // TestResampler_FrameStability runs 100 calls and verifies each produces
 // exactly FrameSize output samples — no drift across frames.
 func TestResampler_FrameStability(t *testing.T) {
-	r, err := NewResampler(SourceSampleRate, SampleRate, NumChannels, DefaultTapsPerPhase)
+	const inRate = 44100
+	const inSamples = inRate * 20 / 1000 * NumChannels // 1764
+	r, err := NewResampler(inRate, SampleRate, NumChannels, DefaultTapsPerPhase)
 	if err != nil {
 		t.Fatalf("NewResampler: %v", err)
 	}
-	in := make([]int16, SourceFrameSize)
+	in := make([]int16, inSamples)
 	out := make([]int16, FrameSize)
 	for i := 0; i < 100; i++ {
 		_, outProduced, err := r.ProcessFrame(in, out)
@@ -280,12 +272,12 @@ func TestResampler_InvalidArgs(t *testing.T) {
 
 // TestResampler_RateAccessors verifies InRate/OutRate report configured rates.
 func TestResampler_RateAccessors(t *testing.T) {
-	r, err := NewResampler(SourceSampleRate, SampleRate, NumChannels, DefaultTapsPerPhase)
+	r, err := NewResampler(44100, SampleRate, NumChannels, DefaultTapsPerPhase)
 	if err != nil {
 		t.Fatalf("NewResampler: %v", err)
 	}
-	if r.InRate() != SourceSampleRate {
-		t.Errorf("InRate: expected %d, got %d", SourceSampleRate, r.InRate())
+	if r.InRate() != 44100 {
+		t.Errorf("InRate: expected 44100, got %d", r.InRate())
 	}
 	if r.OutRate() != SampleRate {
 		t.Errorf("OutRate: expected %d, got %d", SampleRate, r.OutRate())
@@ -295,21 +287,23 @@ func TestResampler_RateAccessors(t *testing.T) {
 // TestResampler_PitchShift verifies that a 1000 Hz tone at 44.1 kHz remains
 // 1000 Hz at 48 kHz (no pitch shift).
 func TestResampler_PitchShift(t *testing.T) {
-	r, err := NewResampler(SourceSampleRate, SampleRate, 1, DefaultTapsPerPhase)
+	r, err := NewResampler(44100, SampleRate, 1, DefaultTapsPerPhase)
 	if err != nil {
 		t.Fatalf("NewResampler: %v", err)
 	}
 
+	const inRate = 44100
+	const inSamples = inRate * 20 / 1000 // 882
 	const numFrames = 50
 	const inAmp = 30000.0
 	const testFreq = 1000.0
-	in := make([]int16, SourceFrameSamples)
+	in := make([]int16, inSamples)
 	out := make([]int16, FrameSamples)
 	allOut := make([]int16, 0, numFrames*FrameSamples)
 	for i := 0; i < numFrames; i++ {
-		for j := 0; j < SourceFrameSamples; j++ {
-			tIdx := i*SourceFrameSamples + j
-			in[j] = int16(inAmp * math.Sin(2*math.Pi*testFreq*float64(tIdx)/float64(SourceSampleRate)))
+		for j := 0; j < inSamples; j++ {
+			tIdx := i*inSamples + j
+			in[j] = int16(inAmp * math.Sin(2*math.Pi*testFreq*float64(tIdx)/float64(inRate)))
 		}
 		if _, _, err := r.ProcessFrame(in, out); err != nil {
 			t.Fatalf("ProcessFrame: %v", err)
@@ -336,21 +330,23 @@ func TestResampler_PitchShift(t *testing.T) {
 // TestResampler_SpectralPurity measures total harmonic distortion / noise
 // of a resampled sine wave compared to a pure reference sine.
 func TestResampler_SpectralPurity(t *testing.T) {
-	r, err := NewResampler(SourceSampleRate, SampleRate, 1, DefaultTapsPerPhase)
+	r, err := NewResampler(44100, SampleRate, 1, DefaultTapsPerPhase)
 	if err != nil {
 		t.Fatalf("NewResampler: %v", err)
 	}
 
+	const inRate = 44100
+	const inSamples = inRate * 20 / 1000 // 882
 	const numFrames = 50
 	const inAmp = 30000.0
 	const testFreq = 1000.0
-	in := make([]int16, SourceFrameSamples)
+	in := make([]int16, inSamples)
 	out := make([]int16, FrameSamples)
 	allOut := make([]int16, 0, numFrames*FrameSamples)
 	for i := 0; i < numFrames; i++ {
-		for j := 0; j < SourceFrameSamples; j++ {
-			tIdx := i*SourceFrameSamples + j
-			in[j] = int16(inAmp * math.Sin(2*math.Pi*testFreq*float64(tIdx)/float64(SourceSampleRate)))
+		for j := 0; j < inSamples; j++ {
+			tIdx := i*inSamples + j
+			in[j] = int16(inAmp * math.Sin(2*math.Pi*testFreq*float64(tIdx)/float64(inRate)))
 		}
 		if _, _, err := r.ProcessFrame(in, out); err != nil {
 			t.Fatalf("ProcessFrame: %v", err)

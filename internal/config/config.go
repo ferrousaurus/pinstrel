@@ -33,8 +33,8 @@ type Config struct {
 	VoiceReadyTimeout int `toml:"VOICE_READY_TIMEOUT"`
 	// SourceSampleRate is the PCM sample rate (in Hz) expected on the audio FIFO
 	// backend (PIPE_PATH). Defaults to 44100 Hz (AirPlay's native sample rate,
-	// written by stock shairport-sync apt builds). Set to 48000 if shairport-sync
-	// is built --with-ffmpeg and configured for 48 kHz output (disables resampling).
+	// written by stock shairport-sync builds). Set to 48000 if shairport-sync
+	// is configured with a 48 kHz backend (disables resampling).
 	SourceSampleRate int `toml:"SOURCE_SAMPLE_RATE"`
 	// TapsPerPhase is the number of FIR taps per polyphase phase when resampling.
 	// Defaults to 16. Range 4..128. Ignored when SOURCE_SAMPLE_RATE = 48000.

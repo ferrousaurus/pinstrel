@@ -17,7 +17,7 @@ sessioncontrol = {
 
 pipe = {
   name = "/tmp/shairport-sync-audio";  // Named pipe path (must match pinstrel config.toml)
-  output_rate = 48000;                 // Match Discord's required sample rate
+  output_rate = 44100;                 // AirPlay native sample rate (pinstrel resamples 44.1kHz -> 48kHz in Go)
   output_format = "S16_LE";            // 16-bit Signed Little-Endian PCM
   output_channels = 2;                 // Stereo
 };
