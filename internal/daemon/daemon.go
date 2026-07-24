@@ -453,6 +453,7 @@ func (d *Daemon) streamLoop() {
 		d.cleanupStreamState()
 		return
 	}
+	log.Printf("Audio resampler initialized (%d Hz -> %d Hz, taps/phase=%d)", d.config.SourceSampleRate, audio.SampleRate, d.config.TapsPerPhase)
 
 	sourceFrameSamples := d.config.SourceSampleRate * 20 / 1000
 	sourceFrameSize := sourceFrameSamples * audio.NumChannels
