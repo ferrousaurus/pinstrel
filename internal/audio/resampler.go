@@ -212,7 +212,7 @@ func (r *Resampler) ProcessFrame(in, out []int16) (int, int, error) {
 			taps := r.coeffs[phase]
 			var y float32
 			for k := 0; k < r.tapsPerPhase; k++ {
-				inputIdx := offset + halfTaps - 1 - k
+				inputIdx := offset + halfTaps - k
 				var s int16
 				switch {
 				case inputIdx >= 0 && inputIdx < inSamples:

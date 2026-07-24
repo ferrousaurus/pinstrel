@@ -292,6 +292,98 @@ func TestResampler_RateAccessors(t *testing.T) {
 	}
 }
 
+// TestResampler_PitchShift verifies that a 1000 Hz tone at 44.1 kHz remains
+// 1000 Hz at 48 kHz (no pitch shift).
+func TestResampler_PitchShift(t *testing.T) {
+	r, err := NewResampler(SourceSampleRate, SampleRate, 1, DefaultTapsPerPhase)
+	if err != nil {
+		t.Fatalf("NewResampler: %v", err)
+	}
+
+	const numFrames = 50
+	const inAmp = 30000.0
+	const testFreq = 1000.0
+	in := make([]int16, SourceFrameSamples)
+	out := make([]int16, FrameSamples)
+	allOut := make([]int16, 0, numFrames*FrameSamples)
+	for i := 0; i < numFrames; i++ {
+		for j := 0; j < SourceFrameSamples; j++ {
+			tIdx := i*SourceFrameSamples + j
+			in[j] = int16(inAmp * math.Sin(2*math.Pi*testFreq*float64(tIdx)/float64(SourceSampleRate)))
+		}
+		if _, _, err := r.ProcessFrame(in, out); err != nil {
+			t.Fatalf("ProcessFrame: %v", err)
+		}
+		allOut = append(allOut, out...)
+	}
+
+	steady := allOut[FrameSamples*5:] // skip initial frames
+
+	// Test amplitude at 1000 Hz vs 1088.4 Hz (pitch up) vs 918.75 Hz (pitch down)
+	amp1000 := goertzelAmp(steady, SampleRate, 1000.0)
+	amp1088 := goertzelAmp(steady, SampleRate, 1000.0 * 48000.0 / 44100.0)
+	amp918 := goertzelAmp(steady, SampleRate, 1000.0 * 44100.0 / 48000.0)
+
+	t.Logf("Amp at 1000 Hz: %.2f", amp1000)
+	t.Logf("Amp at 1088.4 Hz (shifted up): %.2f", amp1088)
+	t.Logf("Amp at 918.75 Hz (shifted down): %.2f", amp918)
+
+	if amp1000 < 20000 || amp1088 > 5000 || amp918 > 5000 {
+		t.Errorf("Pitch shift detected! 1000Hz amp=%.1f, 1088Hz amp=%.1f, 918Hz amp=%.1f", amp1000, amp1088, amp918)
+	}
+}
+
+// TestResampler_SpectralPurity measures total harmonic distortion / noise
+// of a resampled sine wave compared to a pure reference sine.
+func TestResampler_SpectralPurity(t *testing.T) {
+	r, err := NewResampler(SourceSampleRate, SampleRate, 1, DefaultTapsPerPhase)
+	if err != nil {
+		t.Fatalf("NewResampler: %v", err)
+	}
+
+	const numFrames = 50
+	const inAmp = 30000.0
+	const testFreq = 1000.0
+	in := make([]int16, SourceFrameSamples)
+	out := make([]int16, FrameSamples)
+	allOut := make([]int16, 0, numFrames*FrameSamples)
+	for i := 0; i < numFrames; i++ {
+		for j := 0; j < SourceFrameSamples; j++ {
+			tIdx := i*SourceFrameSamples + j
+			in[j] = int16(inAmp * math.Sin(2*math.Pi*testFreq*float64(tIdx)/float64(SourceSampleRate)))
+		}
+		if _, _, err := r.ProcessFrame(in, out); err != nil {
+			t.Fatalf("ProcessFrame: %v", err)
+		}
+		allOut = append(allOut, out...)
+	}
+
+	// Skip startup frames
+	startSample := FrameSamples * 5
+	steady := allOut[startSample:]
+
+	// Fit ideal sine: amplitude ~ inAmp, freq = testFreq (1000 Hz at 48000 Hz)
+	var maxErr float64
+	var sumErrSq float64
+	var sumRefSq float64
+	for m, val := range steady {
+		globalM := startSample + m
+		ref := inAmp * math.Sin(2*math.Pi*testFreq*float64(globalM)/float64(SampleRate))
+		err := float64(val) - ref
+		if math.Abs(err) > maxErr {
+			maxErr = math.Abs(err)
+		}
+		sumErrSq += err * err
+		sumRefSq += ref * ref
+	}
+	snr := 10 * math.Log10(sumRefSq/sumErrSq)
+	t.Logf("Resampler SNR: %.2f dB, Max Sample Error: %.1f", snr, maxErr)
+	if snr < 30.0 {
+		t.Errorf("Resampler spectral purity poor! SNR = %.2f dB (expected > 30 dB)", snr)
+	}
+}
+
+
 func absInt(x int) int {
 	if x < 0 {
 		return -x
